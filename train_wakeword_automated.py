@@ -355,6 +355,71 @@ def test_sample_generation(wake_word: str, pronunciations: list, base_dir: Path)
         if test_dir.exists():
             shutil.rmtree(test_dir, ignore_errors=True)
 
+def cleanup_incomplete_training(wake_word: str, base_dir: Path) -> None:
+    """Clean up incomplete training artifacts that could interfere with new training"""
+    print_header("Pre-Training Cleanup")
+    
+    model_name = wake_word.lower().replace(' ', '_')
+    model_dir = base_dir / "trained_models" / model_name
+    clips_dir = base_dir / "clips" / "generated" / model_name
+    
+    cleaned_items = []
+    
+    # Remove incomplete feature files (.npy)
+    if model_dir.exists():
+        npy_files = list(model_dir.glob("*.npy"))
+        if npy_files:
+            print_info(f"Removing {len(npy_files)} incomplete feature files...")
+            for npy_file in npy_files:
+                try:
+                    npy_file.unlink()
+                    cleaned_items.append(f"Feature file: {npy_file.name}")
+                except Exception as e:
+                    print_warning(f"Could not remove {npy_file.name}: {e}")
+        
+        # Remove incomplete negative sample directories
+        negative_dirs = [d for d in model_dir.glob("negative_*") if d.is_dir()]
+        if negative_dirs:
+            print_info(f"Removing {len(negative_dirs)} incomplete negative sample directories...")
+            for neg_dir in negative_dirs:
+                try:
+                    shutil.rmtree(neg_dir)
+                    cleaned_items.append(f"Negative dir: {neg_dir.name}")
+                except Exception as e:
+                    print_warning(f"Could not remove {neg_dir.name}: {e}")
+        
+        # Remove partial model files
+        partial_models = list(model_dir.glob("checkpoint_*.pt")) + list(model_dir.glob("*.pth"))
+        if partial_models:
+            print_info(f"Removing {len(partial_models)} checkpoint files...")
+            for model_file in partial_models:
+                try:
+                    model_file.unlink()
+                    cleaned_items.append(f"Checkpoint: {model_file.name}")
+                except Exception as e:
+                    print_warning(f"Could not remove {model_file.name}: {e}")
+    
+    # Remove incomplete augmented samples
+    if clips_dir.exists():
+        augmented_dirs = [d for d in clips_dir.glob("*_augmented") if d.is_dir()]
+        if augmented_dirs:
+            print_info(f"Removing {len(augmented_dirs)} incomplete augmented sample directories...")
+            for aug_dir in augmented_dirs:
+                try:
+                    shutil.rmtree(aug_dir)
+                    cleaned_items.append(f"Augmented dir: {aug_dir.name}")
+                except Exception as e:
+                    print_warning(f"Could not remove {aug_dir.name}: {e}")
+    
+    if cleaned_items:
+        print_success(f"Cleaned up {len(cleaned_items)} incomplete training artifacts")
+        for item in cleaned_items[:5]:  # Show first 5
+            print_info(f"  - {item}")
+        if len(cleaned_items) > 5:
+            print_info(f"  ... and {len(cleaned_items) - 5} more")
+    else:
+        print_success("No incomplete training artifacts found")
+
 def create_training_config(
     wake_word: str,
     n_samples: int,
@@ -528,8 +593,33 @@ def generate_samples(wake_word: str, pronunciations: list, n_samples: int, base_
         print_info(f"Using {len(tts_models)} TTS models with {len(variations)} pronunciations")
         print_info(f"Generating ~{samples_per_combo} samples per combination")
         print_info(f"Device: {device.upper()}")
+        print_info("Starting sample generation...\n")
+        
+        # Suppress verbose TTS logging completely
+        import logging
+        logging.getLogger('TTS').setLevel(logging.CRITICAL)
+        logging.getLogger('TTS.tts.utils.synthesis').setLevel(logging.CRITICAL)
+        logging.getLogger('TTS.tts.models').setLevel(logging.CRITICAL)
+        logging.getLogger('TTS.utils').setLevel(logging.CRITICAL)
+        
+        # Suppress stdout from TTS
+        import sys as _sys
+        import io
+        
+        class SuppressOutput:
+            def __enter__(self):
+                self._original_stdout = _sys.stdout
+                self._original_stderr = _sys.stderr
+                _sys.stdout = io.StringIO()
+                _sys.stderr = io.StringIO()
+                return self
+            
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                _sys.stdout = self._original_stdout
+                _sys.stderr = self._original_stderr
         
         valid_count = 0
+        failed_count = 0
         
         for model_config in tts_models:
             model_path = model_config["model"]
@@ -537,7 +627,8 @@ def generate_samples(wake_word: str, pronunciations: list, n_samples: int, base_
             
             print_info(f"\nLoading model: {model_short}...")
             try:
-                tts = TTS(model_name=model_path).to(device)
+                with SuppressOutput():
+                    tts = TTS(model_name=model_path).to(device)
                 
                 for variation in variations:
                     # Create subfolder for this model/variation
@@ -566,15 +657,18 @@ def generate_samples(wake_word: str, pronunciations: list, n_samples: int, base_
                             if 'language' in model_config:
                                 kwargs['language'] = model_config['language']
                             
-                            tts.tts_to_file(**kwargs)
+                            # Generate sample with suppressed output
+                            with SuppressOutput():
+                                tts.tts_to_file(**kwargs)
                             
                             # Validate and process
                             sr, audio = wavfile.read(str(output_file))
                             duration = len(audio) / sr
                             
-                            # Skip if too long
-                            if duration > 3.0:
+                            # Skip if too long (>4 seconds)
+                            if duration > 4.0:
                                 output_file.unlink()
+                                failed_count += 1
                                 continue
                             
                             # Trim silence
@@ -594,11 +688,25 @@ def generate_samples(wake_word: str, pronunciations: list, n_samples: int, base_
                             wavfile.write(str(output_file), 16000, audio)
                             valid_count += 1
                             
-                            if valid_count % 50 == 0:
-                                print_info(f"Generated {valid_count}/{n_samples} samples...")
+                            # Show progress bar with statistics
+                            progress_pct = (valid_count / n_samples) * 100
+                            total_attempts = valid_count + failed_count
+                            fail_pct = (failed_count / total_attempts * 100) if total_attempts > 0 else 0
+                            
+                            # Create progress bar (50 chars wide)
+                            bar_width = 50
+                            filled = int(bar_width * valid_count / n_samples)
+                            bar = '█' * filled + '░' * (bar_width - filled)
+                            
+                            # Format variation name (truncate if too long)
+                            var_display = variation if len(variation) <= 20 else variation[:17] + '...'
+                            
+                            print(f"\r{Colors.OKCYAN}[{bar}] {progress_pct:5.1f}% | {valid_count}/{n_samples} valid | "
+                                  f"Failed: {fail_pct:4.1f}% | Current: '{var_display}' ({model_short}){Colors.ENDC}", 
+                                  end='', flush=True)
                                 
                         except Exception as e:
-                            print_warning(f"Sample generation error: {e}")
+                            failed_count += 1
                             if output_file.exists():
                                 output_file.unlink()
                             continue
@@ -608,6 +716,12 @@ def generate_samples(wake_word: str, pronunciations: list, n_samples: int, base_
                     
                     if valid_count >= n_samples:
                         break
+                
+                # Print newline after progress bar
+                print()
+                total_attempts = valid_count + failed_count
+                fail_pct = (failed_count / total_attempts * 100) if total_attempts > 0 else 0
+                print_success(f"Completed model '{model_short}': {valid_count} valid samples, {failed_count} failed ({fail_pct:.1f}%)")
                         
             except Exception as e:
                 print_warning(f"Model {model_short} failed: {e}")
@@ -617,6 +731,10 @@ def generate_samples(wake_word: str, pronunciations: list, n_samples: int, base_
                 break
         
         print_success(f"\nGenerated {valid_count} valid samples")
+        total_attempts = valid_count + failed_count
+        if failed_count > 0:
+            fail_pct = (failed_count / total_attempts * 100)
+            print_info(f"Total attempts: {total_attempts} (Success rate: {100-fail_pct:.1f}%)")
         print_info(f"TTS models cached in: {base_dir / 'tts'}")
         return valid_count > 0
         
@@ -884,6 +1002,9 @@ def main():
     if not get_yes_no("\nProceed with training?", default=True):
         print_info("Training cancelled")
         sys.exit(0)
+    
+    # Step 6.5: Cleanup incomplete training from previous runs
+    cleanup_incomplete_training(wake_word, base_dir)
     
     # Step 7: Create configuration
     config_file = create_training_config(
