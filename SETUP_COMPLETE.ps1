@@ -334,12 +334,13 @@ if (-not (Test-Path $audiosetPath)) {
 $audiosetCount = (Get-ChildItem -Path $audiosetPath -Filter "*.wav" -Recurse -ErrorAction SilentlyContinue | Measure-Object).Count
 if ($audiosetCount -lt 100) {
     Write-Host "  [!] AudioSet - missing or incomplete ($audiosetCount files)" -ForegroundColor Yellow
+    Write-Host "      (Will be offered during training - requires Python environment)" -ForegroundColor Gray
 } else {
     Write-Host "  [OK] AudioSet - $audiosetCount files" -ForegroundColor Green
 }
 
-# Offer to download missing datasets
-if ($datasetsToDownload.Count -gt 0 -or $audiosetCount -lt 100) {
+# Offer to download missing datasets (excluding AudioSet which requires Python)
+if ($datasetsToDownload.Count -gt 0) {
     Write-Host ""
     $downloadOptional = Read-Host "Download optional datasets now? This improves model quality. (y/N)"
     
@@ -350,16 +351,27 @@ if ($datasetsToDownload.Count -gt 0 -or $audiosetCount -lt 100) {
             try {
                 $mitRirsUrl = "https://mcdermottlab.mit.edu/Reverb/IRMAudio/Audio.zip"
                 $mitRirsZip = "mit_rirs_temp.zip"
+                $tempExtract = "mit_rirs_temp"
                 
                 $ProgressPreference = 'SilentlyContinue'
                 Invoke-WebRequest -Uri $mitRirsUrl -OutFile $mitRirsZip -UseBasicParsing
                 $ProgressPreference = 'Continue'
                 
                 Write-Host "    Extracting MIT RIRs..." -ForegroundColor Gray
-                Expand-Archive -Path $mitRirsZip -DestinationPath $mitRirsPath -Force
-                Remove-Item $mitRirsZip -Force
+                # Extract to temp directory first
+                Expand-Archive -Path $mitRirsZip -DestinationPath $tempExtract -Force
                 
-                $extractedCount = (Get-ChildItem -Path $mitRirsPath -Filter "*.wav" -Recurse | Measure-Object).Count
+                # Move WAV files from nested structure to mit_rirs root
+                $wavFiles = Get-ChildItem -Path $tempExtract -Filter "*.wav" -Recurse
+                foreach ($file in $wavFiles) {
+                    Move-Item -Path $file.FullName -Destination $mitRirsPath -Force
+                }
+                
+                # Clean up
+                Remove-Item $mitRirsZip -Force
+                Remove-Item $tempExtract -Recurse -Force
+                
+                $extractedCount = (Get-ChildItem -Path $mitRirsPath -Filter "*.wav" | Measure-Object).Count
                 Write-Host "    [OK] MIT RIRs downloaded: $extractedCount files" -ForegroundColor Green
             } catch {
                 Write-Host "    [ERROR] Failed to download MIT RIRs: $_" -ForegroundColor Red
@@ -417,28 +429,6 @@ if ($datasetsToDownload.Count -gt 0 -or $audiosetCount -lt 100) {
                 Write-Host "  Skipped FMA download" -ForegroundColor Gray
             }
         }
-        
-        # AudioSet download option (balanced + eval subsets)
-        if ($audiosetCount -lt 100) {
-            Write-Host "`n  AudioSet samples (optional - for maximum quality):" -ForegroundColor Yellow
-            Write-Host "    - Download Balanced + Eval subsets (~40,000 files, 20-50GB)" -ForegroundColor Gray
-            Write-Host "    - Requires: yt-dlp and ffmpeg for YouTube extraction" -ForegroundColor Gray
-            Write-Host "    - Time estimate: 6-24 hours depending on internet speed" -ForegroundColor Gray
-            Write-Host "    - Many videos may be unavailable/region-locked" -ForegroundColor DarkGray
-            
-            $audiosetChoice = Read-Host "`n  Download AudioSet Balanced+Eval subsets? (y/n)"
-            if ($audiosetChoice -eq 'y' -or $audiosetChoice -eq 'Y') {
-                Write-Host "`n    [INFO] AudioSet will be downloaded by Python script during training" -ForegroundColor Cyan
-                Write-Host "    The download will start automatically when you run train_wakeword_automated.py" -ForegroundColor Gray
-                
-                # Create flag file to indicate AudioSet should be downloaded
-                New-Item -Path "audioset_16k\.download_audioset" -ItemType File -Force | Out-Null
-                Write-Host "    [OK] AudioSet download flagged for automatic processing" -ForegroundColor Green
-            } else {
-                Write-Host "    [SKIP] AudioSet download skipped" -ForegroundColor Yellow
-                Write-Host "    You can still get excellent results with MIT RIRs and FMA" -ForegroundColor Gray
-            }
-        }
     } else {
         Write-Host "`n[INFO] Skipped optional dataset downloads" -ForegroundColor Cyan
         Write-Host "Training will use synthetic augmentation (still produces good models)" -ForegroundColor Gray
@@ -450,8 +440,31 @@ if ($datasetsToDownload.Count -gt 0 -or $audiosetCount -lt 100) {
 
 # Test PyTorch CUDA
 Write-Host "`nTesting PyTorch CUDA support..." -ForegroundColor Yellow
-$cudaTest = python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}'); print(f'CUDA device: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"None\"}'); print(f'PyTorch version: {torch.__version__}')" 2>&1
-Write-Host $cudaTest -ForegroundColor Gray
+try {
+    $cudaScript = @"
+import torch
+print('CUDA available:', torch.cuda.is_available())
+if torch.cuda.is_available():
+    print('CUDA device:', torch.cuda.get_device_name(0))
+else:
+    print('CUDA device: None')
+print('PyTorch version:', torch.__version__)
+"@
+    
+    $cudaTest = python -c $cudaScript 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  [ERROR] PyTorch test failed!" -ForegroundColor Red
+        Write-Host $cudaTest -ForegroundColor Red
+        Write-Host "`n[CRITICAL] Setup cannot continue - PyTorch is not working correctly" -ForegroundColor Red
+        Write-Host "Please reinstall PyTorch with: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124" -ForegroundColor Yellow
+        exit 1
+    }
+    Write-Host $cudaTest -ForegroundColor Gray
+} catch {
+    Write-Host "  [ERROR] Failed to test PyTorch: $_" -ForegroundColor Red
+    Write-Host "`n[CRITICAL] Setup cannot continue - Python environment may be corrupted" -ForegroundColor Red
+    exit 1
+}
 
 Write-Host "`n========================================" -ForegroundColor Cyan
 Write-Host "Setup Complete!" -ForegroundColor Green
