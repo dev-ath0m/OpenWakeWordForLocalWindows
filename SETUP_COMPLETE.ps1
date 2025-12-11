@@ -28,6 +28,55 @@ if ($gpu) {
     Write-Host "[WARNING] No NVIDIA GPU detected. Training will use CPU (slower)" -ForegroundColor Yellow
 }
 
+# Check and install ffmpeg (required for AudioSet download and audio processing)
+Write-Host "`nChecking for ffmpeg..." -ForegroundColor Yellow
+$ffmpegInstalled = $false
+try {
+    $ffmpegVersion = ffmpeg -version 2>$null
+    if ($ffmpegVersion) {
+        Write-Host "[OK] ffmpeg is already installed" -ForegroundColor Green
+        $ffmpegInstalled = $true
+    }
+} catch {
+    # ffmpeg not found
+}
+
+if (-not $ffmpegInstalled) {
+    Write-Host "[INFO] ffmpeg not found - required for AudioSet download and audio processing" -ForegroundColor Yellow
+    Write-Host "Attempting to install ffmpeg using winget..." -ForegroundColor Gray
+    
+    try {
+        # Check if winget is available
+        $wingetVersion = winget --version 2>$null
+        if ($wingetVersion) {
+            Write-Host "Installing ffmpeg via winget..." -ForegroundColor Gray
+            winget install --id Gyan.FFmpeg --silent --accept-source-agreements --accept-package-agreements 2>&1 | Out-Null
+            
+            # Refresh PATH to pick up new installation
+            $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+            
+            # Verify installation
+            $ffmpegVersion = ffmpeg -version 2>$null
+            if ($ffmpegVersion) {
+                Write-Host "[OK] ffmpeg installed successfully via winget" -ForegroundColor Green
+                $ffmpegInstalled = $true
+            } else {
+                Write-Host "[WARNING] ffmpeg installation may require shell restart" -ForegroundColor Yellow
+            }
+        } else {
+            throw "winget not available"
+        }
+    } catch {
+        Write-Host "[WARNING] Could not auto-install ffmpeg" -ForegroundColor Yellow
+        Write-Host "Please install ffmpeg manually:" -ForegroundColor Yellow
+        Write-Host "  Option 1 (Recommended): winget install ffmpeg" -ForegroundColor Gray
+        Write-Host "  Option 2: Download from https://www.gyan.dev/ffmpeg/builds/" -ForegroundColor Gray
+        Write-Host "            Extract and add to PATH" -ForegroundColor Gray
+        Write-Host "" -ForegroundColor Gray
+        Write-Host "Note: ffmpeg is only required for AudioSet download (optional)" -ForegroundColor DarkGray
+    }
+}
+
 # Create virtual environment
 Write-Host "`nCreating virtual environment..." -ForegroundColor Yellow
 if (Test-Path "wakeword_env") {
@@ -348,12 +397,26 @@ if ($datasetsToDownload.Count -gt 0 -or $audiosetCount -lt 100) {
             }
         }
         
-        # AudioSet info (cannot auto-download, requires YouTube extraction)
+        # AudioSet download option (balanced + eval subsets)
         if ($audiosetCount -lt 100) {
-            Write-Host ""`n  AudioSet requires manual setup:" -ForegroundColor Yellow
-            Write-Host "    AudioSet provides metadata but audio must be downloaded from YouTube" -ForegroundColor Gray
-            Write-Host "    This is complex and time-consuming - skip unless you need maximum quality" -ForegroundColor Gray
-            Write-Host "    More info: https://research.google.com/audioset/download.html" -ForegroundColor DarkGray
+            Write-Host "`n  AudioSet samples (optional - for maximum quality):" -ForegroundColor Yellow
+            Write-Host "    - Download Balanced + Eval subsets (~40,000 files, 20-50GB)" -ForegroundColor Gray
+            Write-Host "    - Requires: yt-dlp and ffmpeg for YouTube extraction" -ForegroundColor Gray
+            Write-Host "    - Time estimate: 6-24 hours depending on internet speed" -ForegroundColor Gray
+            Write-Host "    - Many videos may be unavailable/region-locked" -ForegroundColor DarkGray
+            
+            $audiosetChoice = Read-Host "`n  Download AudioSet Balanced+Eval subsets? (y/n)"
+            if ($audiosetChoice -eq 'y' -or $audiosetChoice -eq 'Y') {
+                Write-Host "`n    [INFO] AudioSet will be downloaded by Python script during training" -ForegroundColor Cyan
+                Write-Host "    The download will start automatically when you run train_wakeword_automated.py" -ForegroundColor Gray
+                
+                # Create flag file to indicate AudioSet should be downloaded
+                New-Item -Path "audioset_16k\.download_audioset" -ItemType File -Force | Out-Null
+                Write-Host "    [OK] AudioSet download flagged for automatic processing" -ForegroundColor Green
+            } else {
+                Write-Host "    [SKIP] AudioSet download skipped" -ForegroundColor Yellow
+                Write-Host "    You can still get excellent results with MIT RIRs and FMA" -ForegroundColor Gray
+            }
         }
     } else {
         Write-Host "`n[INFO] Skipped optional dataset downloads" -ForegroundColor Cyan

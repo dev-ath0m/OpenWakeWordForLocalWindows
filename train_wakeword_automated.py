@@ -329,12 +329,51 @@ def check_background_datasets(base_dir: Path) -> dict:
                 else:
                     print_info("Skipped FMA download")
             
-            # AudioSet info
+            # AudioSet download option (Balanced + Eval subsets)
             if 'audioset' in missing:
-                print_info("\nAudioSet requires manual setup:")
-                print_info("  AudioSet provides metadata but audio must be downloaded from YouTube")
-                print_info("  This is complex and time-consuming - skip unless you need maximum quality")
-                print_info("  More info: https://research.google.com/audioset/download.html")
+                print_info("\nAudioSet Balanced + Eval subsets (for maximum quality):")
+                print_info("  - Downloads ~40,000 audio clips from YouTube")
+                print_info("  - Estimated size: 20-50 GB")
+                print_info("  - Estimated time: 6-24 hours (depends on internet speed)")
+                print_info("  - Requires: yt-dlp and ffmpeg")
+                print_info("  - Note: Many videos may be unavailable/region-locked")
+                print()
+                
+                if get_yes_no("Download AudioSet Balanced+Eval subsets?", default=False):
+                    # Check if download_audioset.py exists
+                    download_script = Path("download_audioset.py")
+                    if not download_script.exists():
+                        print_error("download_audioset.py not found in workspace")
+                        print_info("This script should have been created during setup")
+                    else:
+                        print_info("\nStarting AudioSet download...")
+                        print_warning("This will take several hours. You can stop with Ctrl+C and resume later.")
+                        print()
+                        
+                        # Run download script
+                        import subprocess
+                        try:
+                            # Run in same Python environment
+                            result = subprocess.run(
+                                [sys.executable, str(download_script), str(audioset_path.parent / "audioset_16k")],
+                                check=False
+                            )
+                            
+                            if result.returncode == 0:
+                                audioset_count = len(list(audioset_path.rglob("*.wav")))
+                                print_success(f"AudioSet download complete: {audioset_count} files")
+                            else:
+                                print_warning("AudioSet download incomplete or failed")
+                                print_info("Check audioset_download.log for details")
+                                
+                        except KeyboardInterrupt:
+                            print_warning("\nAudioSet download interrupted")
+                            print_info("You can resume later by running: python download_audioset.py")
+                        except Exception as e:
+                            print_error(f"Failed to run AudioSet download: {e}")
+                else:
+                    print_info("Skipped AudioSet download")
+                    print_info("You can still get excellent results with MIT RIRs and FMA")
         else:
             print_info("\nSkipped optional dataset downloads")
             print_info("Training will use synthetic augmentation (still produces good models)")
