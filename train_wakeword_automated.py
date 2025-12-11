@@ -865,11 +865,12 @@ def main():
     print_info("  - High quality: 50000+ steps")
     training_steps = get_user_input("Training steps", default="30000", input_type=int)
     
-    print_info("\nFalse activation penalty:")
-    print_info("  - Lower (0.5-1.0): More sensitive, may have false activations")
-    print_info("  - Medium (1.0-2.0): Balanced")
-    print_info("  - Higher (2.0-5.0): Less sensitive, fewer false activations")
-    false_activation_penalty = get_user_input("False activation penalty", default="1.0", input_type=float)
+    print_info("\nFalse activation penalty (max_negative_weight):")
+    print_info("  - Lower (10-100): More sensitive, may trigger on similar sounds")
+    print_info("  - Medium (100-1000): Balanced - recommended starting point")
+    print_info("  - Higher (1000-5000): Very strict, fewer false activations")
+    print_info("  - Very High (5000+): Maximum strictness, may miss some activations")
+    false_activation_penalty = get_user_input("False activation penalty", default="1000", input_type=float)
     
     # Step 6: Confirm settings
     print_header("Configuration Summary")
