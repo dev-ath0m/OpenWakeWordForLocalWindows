@@ -35,6 +35,7 @@ pandas
 torchinfo==1.8.0
 torchmetrics==1.2.0
 datasets==2.14.6
+pyarrow>=12.0.0,<15.0.0
 
 # ===== Model Export and Conversion =====
 onnx==1.14.1

@@ -413,18 +413,26 @@ def download_mit_rirs(output_path: Path) -> bool:
     try:
         import urllib.request
         import zipfile
+        import shutil
         
         url = "https://mcdermottlab.mit.edu/Reverb/IRMAudio/Audio.zip"
         zip_file = output_path.parent / "mit_rirs_temp.zip"
+        temp_extract = output_path.parent / "mit_rirs_temp"
         
         print_info("Downloading MIT RIRs...")
         urllib.request.urlretrieve(url, str(zip_file))
         
         print_info("Extracting MIT RIRs...")
         with zipfile.ZipFile(zip_file, 'r') as zip_ref:
-            zip_ref.extractall(output_path)
+            zip_ref.extractall(temp_extract)
         
+        # Move all WAV files from nested structure to output root
+        for wav_file in temp_extract.rglob("*.wav"):
+            shutil.move(str(wav_file), str(output_path / wav_file.name))
+        
+        # Clean up
         zip_file.unlink()
+        shutil.rmtree(temp_extract)
         return True
         
     except Exception as e:
@@ -445,11 +453,34 @@ def download_mit_environmental(output_path: Path) -> bool:
         print_info("This uses the same dataset as the original Colab training notebook")
         
         # Load dataset from HuggingFace (streaming to avoid loading all in memory)
-        rir_dataset = datasets.load_dataset(
-            "davidscripka/MIT_environmental_impulse_responses",
-            split="train",
-            streaming=True
-        )
+        try:
+            rir_dataset = datasets.load_dataset(
+                "davidscripka/MIT_environmental_impulse_responses",
+                split="train",
+                streaming=True
+            )
+        except Exception as ds_error:
+            error_msg = str(ds_error)
+            if "pyarrow" in error_msg.lower() or "PyExtensionType" in error_msg:
+                print_error("PyArrow compatibility issue detected")
+                print_info("Attempting to fix: pip install --upgrade pyarrow")
+                import subprocess
+                try:
+                    subprocess.run(["pip", "install", "--upgrade", "pyarrow>=12.0.0,<15.0.0"], 
+                                 check=True, capture_output=True)
+                    print_success("PyArrow updated, retrying download...")
+                    # Retry after upgrade
+                    rir_dataset = datasets.load_dataset(
+                        "davidscripka/MIT_environmental_impulse_responses",
+                        split="train",
+                        streaming=True
+                    )
+                except Exception as retry_error:
+                    print_error(f"Still failed after pyarrow upgrade: {retry_error}")
+                    print_warning("Skipping MIT Environmental - MIT RIRs alone provides good reverb")
+                    return False
+            else:
+                raise ds_error
         
         # Save clips to 16-bit PCM wav files
         file_count = 0
