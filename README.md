@@ -178,7 +178,7 @@ Both the setup script and training script will **offer to download** these datas
 |---------|---------|------|---------------|
 | **mit_rirs** | Room impulse responses (reverb simulation) | ~50 MB (271 files) | ✅ Yes |
 | **fma** | Background music (Free Music Archive) | 7.2 GB - 22 GB | ✅ Yes |
-| **audioset_16k** | Background noise (speech, environmental sounds) | Manual setup | ❌ Complex (requires YouTube) |
+| **audioset_16k** | Background noise (speech, environmental sounds) | 20-50 GB (~40K files) | ⚠️ Yes (6-24 hours) |
 
 ### How It Works
 
@@ -186,12 +186,13 @@ Both the setup script and training script will **offer to download** these datas
 - Script checks if datasets are present
 - Offers to download MIT RIRs (~50MB) - quick download
 - Offers choice between FMA small (7.2GB) or medium (22GB)
-- Provides guidance for AudioSet (manual YouTube extraction required)
+- Offers AudioSet Balanced+Eval download (20-50GB, requires yt-dlp)
 
 **During Training (train_wakeword_automated.py):**
 - Same automatic download options
 - Downloads include progress bars
 - Graceful fallback if downloads fail
+- AudioSet download can be interrupted and resumed
 
 ### What Each Dataset Does
 
@@ -205,18 +206,50 @@ Both the setup script and training script will **offer to download** these datas
 - **Impact**: Reduces false triggers when music is playing
 - **Recommendation**: fma_small (7.2GB) is sufficient for most cases
 
-**AudioSet:**
-- **Purpose**: Real-world background noise (speech, traffic, nature, etc.)
-- **Impact**: Improves robustness to environmental noise
-- **Recommendation**: Skip unless you need maximum quality (complex setup)
+**AudioSet (Balanced + Eval subsets):**
+- **Purpose**: Real-world background noise (speech, traffic, nature, music, etc.)
+- **Impact**: Significantly improves robustness to environmental noise
+- **Recommendation**: 
+  - ✅ **Download if**: You have time (6-24 hours) and want maximum quality
+  - ⚠️ **Requirements**: yt-dlp (auto-installed), ffmpeg (manual install), stable internet
+  - ℹ️ **Note**: Downloads ~40,000 clips from YouTube (some may be unavailable)
+
+### AudioSet Download Details
+
+AudioSet provides the highest quality background noise dataset with 527 different sound categories. The automatic download:
+
+1. **Downloads metadata** (CSV files with YouTube video IDs)
+2. **Installs yt-dlp** (if not already installed)
+3. **Requires ffmpeg** (must be installed manually - see setup messages)
+4. **Downloads audio** from YouTube (Balanced + Eval = ~40,000 clips)
+5. **Extracts segments** (10-second clips at 16kHz mono)
+
+**Expected Results:**
+- Success rate: 70-90% (some videos unavailable/region-locked)
+- Final dataset: ~25,000-35,000 audio clips
+- Size: 20-50 GB depending on success rate
+- Time: 6-24 hours depending on internet speed
+
+**Manual AudioSet Download:**
+You can also run the download script manually:
+```bash
+# Full download
+python download_audioset.py
+
+# Test mode (10 samples only)
+python download_audioset.py --test
+```
+
+Check `audioset_download.log` for detailed progress.
 
 ### When to Download
 
 **Download them if:**
 - You want **highest quality** models
 - Your wake word will be used in **noisy environments**
-- You have **disk space** (7-22 GB for FMA)
+- You have **disk space** (30-70 GB for FMA + AudioSet)
 - You want **maximum robustness** to music/background sounds
+- You have **time** for AudioSet download (6-24 hours)
 
 **Skip them if:**
 - You're doing a **quick test**
