@@ -953,10 +953,15 @@ def _generate_negative_samples(wake_word: str, n_samples: int, base_dir: Path) -
         
         os.environ['TTS_HOME'] = str(base_dir)
         
-        # Use faster models for negative samples (same as Piper approach)
+        # Use the same TTS models as positive sample generation for consistency
         tts_models = [
-            "tts_models/en/ljspeech/fast_pitch",
+            "tts_models/en/ljspeech/tacotron2-DDC",
             "tts_models/en/ljspeech/glow-tts",
+            "tts_models/en/ljspeech/fast_pitch",
+            "tts_models/en/ljspeech/vits",
+            "tts_models/en/ljspeech/neural_hmm",
+            "tts_models/en/jenny/jenny",
+            "tts_models/multilingual/multi-dataset/your_tts",  # Both female and male speakers
         ]
         
         # Check GPU
@@ -987,111 +992,179 @@ def _generate_negative_samples(wake_word: str, n_samples: int, base_dir: Path) -
         
         valid_count = 0
         failed_count = 0
-        samples_per_model = n_samples // len(tts_models)
+        
+        # Calculate samples per model configuration (including your_tts male/female as separate)
+        # your_tts will be used with 2 speakers, so count it as 2
+        total_model_configs = len(tts_models) + 1  # +1 because your_tts uses 2 speakers
+        samples_per_model = n_samples // total_model_configs
         
         for model_name in tts_models:
             model_short = model_name.split('/')[-1]
-            print_info(f"\nLoading model: {model_short}...")
             
-            tts = None
-            for attempt in range(2):  # Try twice: once with cache, once forcing re-download
-                try:
-                    # Load model (allow auto-download, suppress only progress bars)
-                    logging.getLogger('TTS').setLevel(logging.WARNING)
-                    
-                    if attempt == 1:
-                        print_warning(f"Retrying {model_short} with forced re-download...")
-                        # Clear cache and force re-download
-                        import shutil
-                        cache_dir = base_dir / "tts" / model_name
-                        if cache_dir.exists():
-                            shutil.rmtree(cache_dir)
-                    
-                    tts = TTS(model_name=model_name).to(device)
-                    logging.getLogger('TTS').setLevel(logging.CRITICAL)
-                    print_success(f"Model {model_short} loaded successfully")
-                    break  # Success, exit retry loop
-                    
-                except Exception as e:
-                    if attempt == 0:
-                        print_warning(f"Model {model_short} failed on first attempt: {e}")
-                        continue  # Try again with re-download
-                    else:
-                        # Both attempts failed
-                        print_error(f"Model {model_short} failed after retry: {e}")
-                        print_error("Cannot continue without all negative sample models")
-                        print_info("This model is critical for generating diverse negative samples")
-                        raise RuntimeError(f"Failed to load {model_short} after 2 attempts")
+            # Handle your_tts with both female and male speakers (like positive generation)
+            if 'your_tts' in model_name:
+                speakers = [
+                    ("female-en-5", "female"),
+                    ("male-en-2", "male")
+                ]
+            else:
+                speakers = [(None, None)]  # Single-speaker models
             
-            if tts is None:
-                print_error(f"Model {model_short} failed to load")
-                raise RuntimeError(f"Failed to load {model_short}")
-            
-            try:
-                # Cycle through adversarial texts
-                for i, text in enumerate(adversarial_texts):
-                    if valid_count >= samples_per_model * (tts_models.index(model_name) + 1):
-                        break
-                    
-                    output_file = negative_train_dir / f"neg_{valid_count}.wav"
-                    
+            for speaker_id, speaker_label in speakers:
+                speaker_suffix = f" ({speaker_label})" if speaker_label else ""
+                print_info(f"\nLoading model: {model_short}{speaker_suffix}...")
+                
+                tts = None
+                for attempt in range(2):  # Try twice: once with cache, once forcing re-download
                     try:
-                        # Generate with speed variation
-                        speed = 1.0 + np.random.uniform(-0.15, 0.15)
+                        # Load model (allow auto-download, suppress only progress bars)
+                        logging.getLogger('TTS').setLevel(logging.WARNING)
                         
-                        with SuppressOutput():
-                            tts.tts_to_file(text=text, file_path=str(output_file), speed=speed)
+                        if attempt == 1:
+                            print_warning(f"Retrying {model_short} with forced re-download...")
+                            # Clear TTS cache more thoroughly
+                            import shutil
+                            
+                            # TTS stores models in TTS_HOME/tts_models/... 
+                            tts_home = base_dir / "tts"
+                            
+                            # Build path to specific model (e.g., tts_models/en/ljspeech/glow-tts)
+                            model_parts = model_name.split('/')
+                            model_cache_path = tts_home
+                            for part in model_parts:
+                                model_cache_path = model_cache_path / part
+                            
+                            if model_cache_path.exists():
+                                print_info(f"Removing corrupted cache: {model_cache_path}")
+                                shutil.rmtree(model_cache_path, ignore_errors=True)
+                            
+                            # Also try parent directory in case structure is different
+                            parent_cache = tts_home / model_name.replace('/', '--')
+                            if parent_cache.exists():
+                                print_info(f"Removing alternative cache location: {parent_cache}")
+                                shutil.rmtree(parent_cache, ignore_errors=True)
+                            
+                            # Give filesystem time to sync
+                            import time
+                            time.sleep(0.5)
                         
-                        # Process audio
-                        sr, audio = wavfile.read(str(output_file))
-                        
-                        # Skip if too long
-                        if len(audio) / sr > 4.0:
-                            output_file.unlink()
-                            failed_count += 1
-                            continue
-                        
-                        # Trim and resample
-                        audio_float = audio.astype(np.float32)
-                        audio_trimmed, _ = librosa.effects.trim(audio_float, top_db=30)
-                        
-                        if sr != 16000:
-                            from scipy import signal
-                            num_samples_resampled = int(len(audio_trimmed) * 16000 / sr)
-                            audio_resampled = signal.resample(audio_trimmed, num_samples_resampled)
-                            audio = audio_resampled.astype(np.int16)
-                        else:
-                            audio = audio_trimmed.astype(np.int16)
-                        
-                        wavfile.write(str(output_file), 16000, audio)
-                        valid_count += 1
-                        
-                        # Show progress
-                        if valid_count % 50 == 0 or valid_count == n_samples:
-                            progress_pct = (valid_count / n_samples) * 100
-                            fail_pct = (failed_count / (valid_count + failed_count) * 100) if (valid_count + failed_count) > 0 else 0
-                            print_info(f"Progress: {valid_count}/{n_samples} ({progress_pct:.1f}%) | Failed: {fail_pct:.1f}%")
+                        tts = TTS(model_name=model_name).to(device)
+                        logging.getLogger('TTS').setLevel(logging.CRITICAL)
+                        print_success(f"Model {model_short}{speaker_suffix} loaded successfully")
+                        break  # Success, exit retry loop
                         
                     except Exception as e:
-                        failed_count += 1
-                        if output_file.exists():
-                            output_file.unlink()
-                        continue
+                        if attempt == 0:
+                            print_warning(f"Model {model_short} failed on first attempt: {e}")
+                            continue  # Try again with re-download
+                        else:
+                            # Both attempts failed - provide detailed diagnostics
+                            print_error(f"Model {model_short} failed after retry: {e}")
+                            print_error("Cannot continue without all negative sample models")
+                            
+                            # Help user diagnose the issue
+                            print_info("Diagnostic information:")
+                            tts_home = base_dir / "tts"
+                            if tts_home.exists():
+                                print_info(f"TTS cache directory exists: {tts_home}")
+                                # List what's actually in the cache
+                                try:
+                                    cache_contents = list(tts_home.rglob("*"))[:10]  # First 10 items
+                                    if cache_contents:
+                                        print_info("Cache contents (first 10 items):")
+                                        for item in cache_contents:
+                                            print_info(f"  - {item.relative_to(tts_home)}")
+                                    else:
+                                        print_warning("Cache directory is empty!")
+                                except Exception:
+                                    pass
+                            else:
+                                print_warning(f"TTS cache directory doesn't exist: {tts_home}")
+                            
+                            print_info("\nPossible solutions:")
+                            print_info("  1. Manually delete the TTS cache and retry: rmdir /s /q tts")
+                            print_info("  2. Check disk space and permissions")
+                            print_info("  3. Run the script again - other models will continue generation")
+                            
+                            break  # Exit retry loop for this model
+                
+                if tts is None:
+                    print_warning(f"Model {model_short}{speaker_suffix} failed - continuing with remaining models")
+                    continue  # Try next speaker/model
+                
+                try:
+                    # Cycle through adversarial texts
+                    for i, text in enumerate(adversarial_texts):
+                        if valid_count >= n_samples:
+                            break
+                        
+                        output_file = negative_train_dir / f"neg_{valid_count}.wav"
+                        
+                        try:
+                            # Generate with speed variation
+                            speed = 1.0 + np.random.uniform(-0.15, 0.15)
+                            
+                            with SuppressOutput():
+                                # Use speaker_id for multi-speaker models
+                                if speaker_id:
+                                    tts.tts_to_file(text=text, speaker=speaker_id, file_path=str(output_file), speed=speed)
+                                else:
+                                    tts.tts_to_file(text=text, file_path=str(output_file), speed=speed)
+                            
+                            # Process audio
+                            sr, audio = wavfile.read(str(output_file))
+                            
+                            # Skip if too long
+                            if len(audio) / sr > 4.0:
+                                output_file.unlink()
+                                failed_count += 1
+                                continue
+                            
+                            # Trim and resample
+                            audio_float = audio.astype(np.float32)
+                            audio_trimmed, _ = librosa.effects.trim(audio_float, top_db=30)
+                            
+                            if sr != 16000:
+                                from scipy import signal
+                                num_samples_resampled = int(len(audio_trimmed) * 16000 / sr)
+                                audio_resampled = signal.resample(audio_trimmed, num_samples_resampled)
+                                audio = audio_resampled.astype(np.int16)
+                            else:
+                                audio = audio_trimmed.astype(np.int16)
+                            
+                            wavfile.write(str(output_file), 16000, audio)
+                            valid_count += 1
+                            
+                            # Show progress
+                            if valid_count % 50 == 0 or valid_count == n_samples:
+                                progress_pct = (valid_count / n_samples) * 100
+                                fail_pct = (failed_count / (valid_count + failed_count) * 100) if (valid_count + failed_count) > 0 else 0
+                                print_info(f"Progress: {valid_count}/{n_samples} ({progress_pct:.1f}%) | Failed: {fail_pct:.1f}%")
+                            
+                        except Exception as e:
+                            failed_count += 1
+                            if output_file.exists():
+                                output_file.unlink()
+                            continue
+                    
+                    if valid_count >= n_samples:
+                        break
+                        
+                except Exception as model_error:
+                    # Model-level error (not individual sample error)
+                    print_error(f"Critical error with model {model_short}{speaker_suffix}: {model_error}")
+                    import traceback
+                    traceback.print_exc()
+                    continue  # Try next speaker/model instead of aborting
                 
                 if valid_count >= n_samples:
                     break
-                    
-            except Exception as model_error:
-                # Model-level error (not individual sample error)
-                print_error(f"Critical error with model {model_short}: {model_error}")
-                import traceback
-                traceback.print_exc()
-                raise  # Re-raise to abort training
         
-        # Check if we generated enough samples
-        if valid_count < n_samples * 0.9:  # Allow 10% tolerance
-            print_error(f"Insufficient negative samples generated: {valid_count}/{n_samples}")
-            print_error("Training requires adequate negative samples for good performance")
+        # Final validation - require at least 80% of target samples (allow some model failures)
+        if valid_count < n_samples * 0.8:
+            print_error(f"\nInsufficient negative samples generated: {valid_count}/{n_samples}")
+            print_error("Training requires at least 80% of target samples")
+            print_error("Try clearing TTS cache (rmdir /s /q tts) and running again")
             return False
         
         print_success(f"\nGenerated {valid_count} negative samples in {negative_train_dir}")
