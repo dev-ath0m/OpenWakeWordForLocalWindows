@@ -549,57 +549,69 @@ def create_training_config(
     # Create output directory
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Build configuration
+    # Build configuration matching OpenWakeWord's expected format
     config = {
         'model_name': model_name,
-        'wake_word': wake_word,
+        'model_type': 'dnn',
+        'target_phrase': [wake_word],  # Must be a list
+        
+        # Sample counts
+        'n_samples': n_samples,
+        'n_samples_val': n_samples // 10,  # 10% for validation
         
         # Training parameters
-        'n_samples': n_samples,
         'steps': training_steps,
-        'false_activation_penalty': false_activation_penalty,
+        'max_negative_weight': false_activation_penalty,
+        'target_accuracy': 0.5,
+        'target_recall': 0.25,
+        'target_false_positives_per_hour': 0.2,
+        'layer_size': 32,
         
-        # Paths
-        'positive_audio_dir': str(clips_dir),
+        # Paths - must match what train.py expects
         'output_dir': str(output_dir),
+        'rir_paths': [str(base_dir / "mit_rirs")],
+        'background_paths': [
+            str(base_dir / "audioset_16k"),
+            str(base_dir / "fma")
+        ],
+        'background_paths_duplication_rate': [1, 1],
         
-        # Feature settings
-        'feature_extraction': {
-            'n_fft': 2048,
-            'hop_length': 512,
-            'n_mels': 96,
-            'sample_rate': 16000
+        # Augmentation settings
+        'augmentation_batch_size': 16,
+        'augmentation_rounds': 1,
+        'tts_batch_size': 50,
+        
+        # Batch settings for training
+        'batch_n_per_class': {
+            'positive': 50,
+            'adversarial_negative': 50,
+            'ACAV100M_sample': 1024
         },
         
-        # Model settings
-        'model': {
-            'target_phrase_weight': 1.0,
-            'negative_phrase_weight': false_activation_penalty,
-        },
-        
-        # GPU settings
-        'device': 'cuda' if use_gpu else 'cpu',
-        'batch_size': 128 if use_gpu else 32,
-        
-        # Augmentation
-        'augmentation': {
-            'background_noise_dir': str(base_dir / "audioset_16k"),
-            'music_dir': str(base_dir / "fma"),
-            'room_impulse_dir': str(base_dir / "mit_rirs"),
-        },
-        
-        # Disable Piper generator (not compatible with Windows)
-        'use_piper': False
+        # Custom negative phrases (empty, we use adversarial generation)
+        'custom_negative_phrases': [],
     }
     
     # Add ACAV100M features if available
+    acav100m_features = base_dir / "openwakeword_features_ACAV100M_2000_hrs_16bit.npy"
+    validation_features = base_dir / "validation_set_features.npy"
+    
     if acav100m_features.exists():
-        config['ACAV100M_features_path'] = str(acav100m_features)
-        config['ACAV100M_sample'] = 1024
+        config['feature_data_files'] = {
+            'ACAV100M_sample': str(acav100m_features)
+        }
         print_success(f"ACAV100M features found: {acav100m_features}")
     else:
         print_warning("ACAV100M features not found - adversarial sampling disabled")
         print_info("Download from: https://github.com/dscripka/openWakeWord")
+        # Remove ACAV100M from batch settings if not available
+        del config['batch_n_per_class']['ACAV100M_sample']
+    
+    if validation_features.exists():
+        config['false_positive_validation_data_path'] = str(validation_features)
+        print_success(f"Validation features found: {validation_features}")
+    else:
+        print_warning("Validation features not found - using training data for validation")
     
     # Save configuration
     config_file = base_dir / f"training_config_{model_name}.yaml"
@@ -981,13 +993,41 @@ def _generate_negative_samples(wake_word: str, n_samples: int, base_dir: Path) -
             model_short = model_name.split('/')[-1]
             print_info(f"\nLoading model: {model_short}...")
             
+            tts = None
+            for attempt in range(2):  # Try twice: once with cache, once forcing re-download
+                try:
+                    # Load model (allow auto-download, suppress only progress bars)
+                    logging.getLogger('TTS').setLevel(logging.WARNING)
+                    
+                    if attempt == 1:
+                        print_warning(f"Retrying {model_short} with forced re-download...")
+                        # Clear cache and force re-download
+                        import shutil
+                        cache_dir = base_dir / "tts" / model_name
+                        if cache_dir.exists():
+                            shutil.rmtree(cache_dir)
+                    
+                    tts = TTS(model_name=model_name).to(device)
+                    logging.getLogger('TTS').setLevel(logging.CRITICAL)
+                    print_success(f"Model {model_short} loaded successfully")
+                    break  # Success, exit retry loop
+                    
+                except Exception as e:
+                    if attempt == 0:
+                        print_warning(f"Model {model_short} failed on first attempt: {e}")
+                        continue  # Try again with re-download
+                    else:
+                        # Both attempts failed
+                        print_error(f"Model {model_short} failed after retry: {e}")
+                        print_error("Cannot continue without all negative sample models")
+                        print_info("This model is critical for generating diverse negative samples")
+                        raise RuntimeError(f"Failed to load {model_short} after 2 attempts")
+            
+            if tts is None:
+                print_error(f"Model {model_short} failed to load")
+                raise RuntimeError(f"Failed to load {model_short}")
+            
             try:
-                # Load model (allow auto-download, suppress only progress bars)
-                logging.getLogger('TTS').setLevel(logging.WARNING)
-                tts = TTS(model_name=model_name).to(device)
-                logging.getLogger('TTS').setLevel(logging.CRITICAL)
-                print_success(f"Model {model_short} loaded successfully")
-                
                 # Cycle through adversarial texts
                 for i, text in enumerate(adversarial_texts):
                     if valid_count >= samples_per_model * (tts_models.index(model_name) + 1):
@@ -1041,14 +1081,27 @@ def _generate_negative_samples(wake_word: str, n_samples: int, base_dir: Path) -
                 if valid_count >= n_samples:
                     break
                     
-            except Exception as e:
-                print_warning(f"Model {model_short} failed: {e}")
-                continue
+            except Exception as model_error:
+                # Model-level error (not individual sample error)
+                print_error(f"Critical error with model {model_short}: {model_error}")
+                import traceback
+                traceback.print_exc()
+                raise  # Re-raise to abort training
+        
+        # Check if we generated enough samples
+        if valid_count < n_samples * 0.9:  # Allow 10% tolerance
+            print_error(f"Insufficient negative samples generated: {valid_count}/{n_samples}")
+            print_error("Training requires adequate negative samples for good performance")
+            return False
         
         print_success(f"\nGenerated {valid_count} negative samples in {negative_train_dir}")
         if failed_count > 0:
             print_info(f"Failed: {failed_count} samples ({failed_count/(valid_count+failed_count)*100:.1f}%)")
-        return valid_count > 0
+        
+        if valid_count < n_samples:
+            print_warning(f"Generated {valid_count}/{n_samples} samples (some models may have failed)")
+        
+        return True
         
     except Exception as e:
         print_error(f"Negative sample generation failed: {e}")
