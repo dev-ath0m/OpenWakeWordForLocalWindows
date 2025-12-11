@@ -24,6 +24,7 @@ mutagen==1.47.0
 librosa
 soundfile
 resampy
+pydub
 
 # ===== Scientific Computing =====
 numpy<2.0,>=1.21

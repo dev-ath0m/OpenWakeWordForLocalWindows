@@ -164,13 +164,16 @@ Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Yellow
 Write-Host "1. Activate environment: .\wakeword_env\Scripts\Activate.ps1" -ForegroundColor White
-Write-Host "2. Generate samples: python generate_samples_coqui.py" -ForegroundColor White
-Write-Host "3. Train model: python train_houwme_wakeword.py" -ForegroundColor White
+Write-Host "2. Run automated workflow: python train_wakeword_automated.py" -ForegroundColor White
 Write-Host ""
-Write-Host "Or run a quick test (1000 samples, 10000 steps):" -ForegroundColor Yellow
-Write-Host "  cd openwakeword" -ForegroundColor White
-Write-Host "  python openwakeword\train.py --training_config ..\test_train.yaml --generate_clips --augment_clips --train_model" -ForegroundColor White
+Write-Host "The automated script will:" -ForegroundColor Yellow
+Write-Host "  - Guide you through wake word configuration" -ForegroundColor Gray
+Write-Host "  - Let you add custom pronunciations" -ForegroundColor Gray
+Write-Host "  - Generate test samples for verification" -ForegroundColor Gray
+Write-Host "  - Generate training samples using multiple TTS models" -ForegroundColor Gray
+Write-Host "  - Augment samples with noise and reverb" -ForegroundColor Gray
+Write-Host "  - Train the model with GPU acceleration" -ForegroundColor Gray
+Write-Host "  - Export ONNX model for Home Assistant" -ForegroundColor Gray
 Write-Host ""
-Write-Host "Files created:" -ForegroundColor Yellow
-Write-Host "  - Model ONNX: test_model\homie_test.onnx (for Home Assistant)" -ForegroundColor White
+Write-Host "All dependencies and TTS models will download automatically!" -ForegroundColor Green
 Write-Host ""
