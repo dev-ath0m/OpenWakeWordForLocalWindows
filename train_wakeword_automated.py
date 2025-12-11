@@ -760,8 +760,11 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
             
             print_info(f"\nLoading model: {model_short}...")
             try:
-                with SuppressOutput():
-                    tts = TTS(model_name=model_path).to(device)
+                # Load model (don't suppress to allow auto-download messages)
+                logging.getLogger('TTS').setLevel(logging.WARNING)
+                tts = TTS(model_name=model_path).to(device)
+                logging.getLogger('TTS').setLevel(logging.CRITICAL)
+                print_success(f"Model {model_short} loaded successfully")
                 
                 for variation in variations:
                     # Create subfolder for this model/variation
@@ -897,14 +900,34 @@ def _generate_negative_samples(wake_word: str, n_samples: int, base_dir: Path) -
         
         from openwakeword.data import generate_adversarial_texts
         
-        # Generate adversarial texts based on the wake word
+        # Patch torch.load to use weights_only=False for deep-phonemizer compatibility
+        # This is safe as we're loading from the trusted deep-phonemizer package
         print_info(f"Analyzing phonemes for '{wake_word}'...")
-        adversarial_texts = generate_adversarial_texts(
-            input_text=wake_word,
-            N=n_samples,
-            include_partial_phrase=1.0,  # Include partial phrases (e.g., "ho" from "homie")
-            include_input_words=0.2      # Sometimes include actual wake word parts
-        )
+        print_info("Note: Temporarily allowing unsafe pickle loading for deep-phonemizer (PyTorch 2.6 compatibility)")
+        
+        import torch
+        original_torch_load = torch.load
+        
+        def patched_torch_load(*args, **kwargs):
+            """Temporary patch for PyTorch 2.6 compatibility with deep-phonemizer"""
+            if 'weights_only' not in kwargs:
+                kwargs['weights_only'] = False
+            return original_torch_load(*args, **kwargs)
+        
+        try:
+            # Apply patch
+            torch.load = patched_torch_load
+            
+            # Generate adversarial texts with patched torch.load
+            adversarial_texts = generate_adversarial_texts(
+                input_text=wake_word,
+                N=n_samples,
+                include_partial_phrase=1.0,  # Include partial phrases (e.g., "ho" from "homie")
+                include_input_words=0.2      # Sometimes include actual wake word parts
+            )
+        finally:
+            # Restore original torch.load
+            torch.load = original_torch_load
         
         print_success(f"Generated {len(adversarial_texts)} phonetically similar phrases")
         print_info(f"Examples: {', '.join(adversarial_texts[:5])}")
@@ -959,8 +982,11 @@ def _generate_negative_samples(wake_word: str, n_samples: int, base_dir: Path) -
             print_info(f"\nLoading model: {model_short}...")
             
             try:
-                with SuppressOutput():
-                    tts = TTS(model_name=model_name).to(device)
+                # Load model (allow auto-download, suppress only progress bars)
+                logging.getLogger('TTS').setLevel(logging.WARNING)
+                tts = TTS(model_name=model_name).to(device)
+                logging.getLogger('TTS').setLevel(logging.CRITICAL)
+                print_success(f"Model {model_short} loaded successfully")
                 
                 # Cycle through adversarial texts
                 for i, text in enumerate(adversarial_texts):
