@@ -187,9 +187,105 @@ def clone_openwakeword(base_dir: Path) -> bool:
             capture_output=True
         )
         print_success("OpenWakeWord package installed")
-        return True
     except subprocess.CalledProcessError as e:
         print_error(f"OpenWakeWord installation failed: {e}")
+        return False
+    
+    # Patch train.py to make Piper optional
+    if not patch_openwakeword_train_script(openwakeword_dir):
+        print_warning("Failed to patch train.py - Piper will be required")
+        print_warning("Training may fail if Piper is not available")
+    
+    return True
+
+def patch_openwakeword_train_script(openwakeword_dir: Path) -> bool:
+    """Patch OpenWakeWord's train.py to make Piper dependency optional"""
+    train_script = openwakeword_dir / "openwakeword" / "train.py"
+    
+    if not train_script.exists():
+        print_error(f"train.py not found at {train_script}")
+        return False
+    
+    print_info("Patching train.py to make Piper optional...")
+    
+    try:
+        import re
+        
+        # Read the file
+        content = train_script.read_text(encoding='utf-8')
+        original_content = content
+        
+        # Patch 1: Make Piper import conditional
+        # Find: sys.path.insert(0, os.path.abspath(config["piper_sample_generator_path"]))
+        #       from generate_samples import generate_samples
+        # Replace with conditional import
+        pattern1 = r'(\s+# imports Piper for synthetic sample generation\s+)sys\.path\.insert\(0, os\.path\.abspath\(config\["piper_sample_generator_path"\]\)\)\s+from generate_samples import generate_samples'
+        replacement1 = r'''\1# imports Piper for synthetic sample generation (only if path is provided)
+    if "piper_sample_generator_path" in config and config["piper_sample_generator_path"]:
+        sys.path.insert(0, os.path.abspath(config["piper_sample_generator_path"]))
+        from generate_samples import generate_samples
+    else:
+        # Piper not available - samples must be pre-generated
+        generate_samples = None'''
+        
+        content = re.sub(pattern1, replacement1, content, count=1)
+        
+        # Patch 2: Add check before generate_samples calls
+        # Pattern to find generate_samples( calls and add None check before them
+        # We need to be careful to only patch calls within the --generate_clips section
+        
+        # For positive training samples
+        pattern2 = r'(if n_current_samples <= 0\.95\*config\["n_samples"\]:\s+)(generate_samples\(\s+text=config\["target_phrase"\])'
+        replacement2 = r'''\1if generate_samples is None:
+                logging.error("Piper sample generator not available and positive samples not pre-generated!")
+                logging.error("Please generate samples manually or provide piper_sample_generator_path in config")
+                raise RuntimeError("Cannot generate clips without Piper or pre-generated samples")
+            \2'''
+        
+        content = re.sub(pattern2, replacement2, content, count=1)
+        
+        # For positive test samples
+        pattern3 = r'(if n_current_samples <= 0\.95\*config\["n_samples_val"\]:\s+)(generate_samples\(text=config\["target_phrase"\], max_samples=config\["n_samples_val"\])'
+        replacement3 = r'''\1if generate_samples is None:
+                logging.error("Piper sample generator not available and positive test samples not pre-generated!")
+                raise RuntimeError("Cannot generate clips without Piper or pre-generated samples")
+            \2'''
+        
+        content = re.sub(pattern3, replacement3, content, count=1)
+        
+        # For negative training samples
+        pattern4 = r'(include_input_words=0\.2\)\)\s+)(generate_samples\(text=adversarial_texts, max_samples=config\["n_samples"\]-n_current_samples,\s+batch_size=config\["tts_batch_size"\]//7,)'
+        replacement4 = r'''\1if generate_samples is None:
+                logging.error("Piper sample generator not available and negative samples not pre-generated!")
+                raise RuntimeError("Cannot generate clips without Piper or pre-generated samples")
+            \2'''
+        
+        content = re.sub(pattern4, replacement4, content, count=1)
+        
+        # For negative test samples  
+        pattern5 = r'(include_input_words=0\.2\)\)\s+)(generate_samples\(text=adversarial_texts, max_samples=config\["n_samples_val"\]-n_current_samples,\s+batch_size=config\["tts_batch_size"\]//7,)'
+        replacement5 = r'''\1if generate_samples is None:
+                logging.error("Piper sample generator not available and negative test samples not pre-generated!")
+                raise RuntimeError("Cannot generate clips without Piper or pre-generated samples")
+            \2'''
+        
+        content = re.sub(pattern5, replacement5, content, count=1)
+        
+        # Check if any changes were made
+        if content == original_content:
+            print_warning("No changes made - train.py may already be patched or format has changed")
+            print_info("Manual verification recommended")
+            return True  # Don't fail, just warn
+        
+        # Write the patched content back
+        train_script.write_text(content, encoding='utf-8')
+        print_success("train.py patched successfully - Piper is now optional")
+        return True
+        
+    except Exception as e:
+        print_error(f"Patching failed: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 def install_dependencies() -> bool:
@@ -576,9 +672,17 @@ def generate_samples(wake_word: str, pronunciations: list, n_samples: int, base_
     
     # Generate both positive and negative samples
     positive_success = _generate_positive_samples(wake_word, pronunciations, n_samples, clips_dir, base_dir)
-    negative_success = _generate_negative_samples(wake_word, n_samples, base_dir)
+    if not positive_success:
+        print_error("Positive sample generation failed - cannot continue")
+        return False
     
-    return positive_success
+    negative_success = _generate_negative_samples(wake_word, n_samples, base_dir)
+    if not negative_success:
+        print_error("Negative sample generation failed - cannot continue")
+        print_error("Training requires both positive and negative samples")
+        return False
+    
+    return True
 
 
 def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: int, clips_dir: Path, base_dir: Path) -> bool:
@@ -922,7 +1026,11 @@ def _generate_negative_samples(wake_word: str, n_samples: int, base_dir: Path) -
         
     except Exception as e:
         print_error(f"Negative sample generation failed: {e}")
-        print_warning("Training will use ACAV100M features only for negative samples")
+        print_error("This is a critical error - training cannot proceed without negative samples")
+        print_info("The error is likely due to PyTorch 2.6 changing torch.load security defaults")
+        print_info("Possible solutions:")
+        print_info("  1. Downgrade PyTorch to 2.5 or earlier")
+        print_info("  2. Wait for deep-phonemizer to update their checkpoint format")
         import traceback
         traceback.print_exc()
         return False
