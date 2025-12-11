@@ -240,55 +240,111 @@ def get_yes_no(prompt: str, default: bool = True) -> bool:
         else:
             print_warning("Please answer 'y' or 'n'")
 
-def test_sample_generation(wake_word: str, base_dir: Path) -> bool:
-    """Generate a test sample and wait for user confirmation"""
+def get_pronunciations(wake_word: str) -> list:
+    """Get list of pronunciation variations from user"""
+    print_header("Pronunciation Variations")
+    
+    print_info("You can provide multiple pronunciation variations to improve model accuracy")
+    print_info("Examples for 'homie': homie, houw mee, ho mee, home ee")
+    print_info("")
+    print_info("Enter pronunciations one per line (press Enter twice when done)")
+    print_info(f"First pronunciation (default): {wake_word}")
+    
+    pronunciations = [wake_word]  # Always include the original
+    
+    while True:
+        user_input = input(f"{Colors.OKCYAN}Pronunciation #{len(pronunciations) + 1} (or press Enter to finish): {Colors.ENDC}").strip()
+        
+        if not user_input:
+            break
+        
+        if user_input.lower() != wake_word.lower() and user_input not in pronunciations:
+            pronunciations.append(user_input)
+            print_success(f"Added: {user_input}")
+        elif user_input in pronunciations:
+            print_warning("Already added, skipping")
+        else:
+            print_warning("Same as original, skipping")
+    
+    print_success(f"\nTotal pronunciations: {len(pronunciations)}")
+    for i, p in enumerate(pronunciations, 1):
+        print_info(f"  {i}. {p}")
+    
+    return pronunciations
+
+def test_sample_generation(wake_word: str, pronunciations: list, base_dir: Path) -> list:
+    """Generate test samples for each pronunciation and get user feedback"""
     print_header("Testing Sample Generation")
     
-    print_info(f"Generating test sample for '{wake_word}'...")
-    print_info("This will use the default TTS model to create one sample")
+    print_info(f"Generating test samples for {len(pronunciations)} pronunciation(s)")
+    print_info("This will use the default TTS model to create one sample for each")
     
     # Create temporary test directory
     test_dir = base_dir / "test_sample"
     test_dir.mkdir(exist_ok=True)
     
+    approved_pronunciations = []
+    test_files = []
+    
     try:
         # Import TTS
         from TTS.api import TTS
-        import soundfile as sf
         
         # Initialize TTS (using fast model for quick test)
-        print_info("Loading TTS model...")
+        print_info("\nLoading TTS model...")
         tts = TTS("tts_models/en/ljspeech/fast_pitch")
         
-        # Generate sample
-        test_file = test_dir / f"{wake_word}_test.wav"
-        print_info(f"Generating: {test_file}")
-        tts.tts_to_file(text=wake_word, file_path=str(test_file))
-        
-        print_success(f"Test sample generated: {test_file}")
-        print_info("\nPlease listen to the sample to verify it sounds correct")
-        print_info(f"Location: {test_file}")
-        
-        # Ask user to confirm
-        if platform.system() == 'Windows':
-            print_info("\nAttempting to play sample...")
-            try:
-                subprocess.run(['powershell', '-c', f'(New-Object Media.SoundPlayer "{test_file}").PlaySync()'], 
-                             timeout=10)
-            except:
-                print_warning("Auto-play failed, please play manually")
-        
-        confirmed = get_yes_no("\nDoes the sample sound correct?", default=True)
-        
-        if confirmed:
-            print_success("Sample confirmed - proceeding with training")
-            return True
-        else:
-            print_warning("Sample rejected - you may need to adjust pronunciation")
-            print_info("Consider creating a custom pronunciation in generate_samples_coqui.py")
+        # Generate samples for each pronunciation
+        for i, pronunciation in enumerate(pronunciations, 1):
+            print_info(f"\n[{i}/{len(pronunciations)}] Generating sample for: '{pronunciation}'")
             
-            retry = get_yes_no("Continue anyway?", default=False)
-            return retry
+            safe_name = pronunciation.replace(' ', '_').replace('/', '_')
+            test_file = test_dir / f"{safe_name}_test.wav"
+            
+            try:
+                tts.tts_to_file(text=pronunciation, file_path=str(test_file))
+                test_files.append((pronunciation, test_file))
+                print_success(f"Generated: {test_file}")
+            except Exception as e:
+                print_error(f"Failed to generate sample: {e}")
+                continue
+        
+        # Play and get user feedback for each sample
+        print_header("Review Generated Samples")
+        print_info("Please listen to each sample and decide if the pronunciation sounds good")
+        
+        for pronunciation, test_file in test_files:
+            print(f"\n{Colors.BOLD}Pronunciation: {pronunciation}{Colors.ENDC}")
+            print_info(f"File: {test_file}")
+            
+            # Auto-play on Windows
+            if platform.system() == 'Windows':
+                print_info("Playing sample...")
+                try:
+                    subprocess.run(['powershell', '-c', f'(New-Object Media.SoundPlayer "{test_file}").PlaySync()'], 
+                                 timeout=10)
+                except:
+                    print_warning("Auto-play failed, please play manually")
+            
+            # Get user decision
+            keep = get_yes_no(f"Keep this pronunciation '{pronunciation}' for training?", default=True)
+            
+            if keep:
+                approved_pronunciations.append(pronunciation)
+                print_success(f"✓ Kept: {pronunciation}")
+            else:
+                print_warning(f"✗ Skipped: {pronunciation}")
+        
+        # Summary
+        print_header("Pronunciation Selection Summary")
+        if approved_pronunciations:
+            print_success(f"Selected {len(approved_pronunciations)} pronunciation(s) for training:")
+            for i, p in enumerate(approved_pronunciations, 1):
+                print_info(f"  {i}. {p}")
+        else:
+            print_warning("No pronunciations selected!")
+            
+        return approved_pronunciations
             
     except Exception as e:
         print_error(f"Sample generation failed: {e}")
@@ -383,7 +439,7 @@ def create_training_config(
     
     return config_file
 
-def generate_samples(wake_word: str, n_samples: int, base_dir: Path) -> bool:
+def generate_samples(wake_word: str, pronunciations: list, n_samples: int, base_dir: Path) -> bool:
     """Generate TTS samples for training using multiple models with automatic downloading"""
     print_header("Generating TTS Samples")
     
@@ -392,6 +448,7 @@ def generate_samples(wake_word: str, n_samples: int, base_dir: Path) -> bool:
     clips_dir.mkdir(parents=True, exist_ok=True)
     
     print_info(f"Generating {n_samples} samples for '{wake_word}'")
+    print_info(f"Using {len(pronunciations)} pronunciation(s): {', '.join(pronunciations)}")
     print_info(f"Output directory: {clips_dir}")
     
     # Check if custom generator exists (provides more control and variety)
@@ -400,6 +457,9 @@ def generate_samples(wake_word: str, n_samples: int, base_dir: Path) -> bool:
         print_info("Using custom multi-model generator (generate_samples_coqui.py)")
         print_info("This will use 6 different TTS models for maximum voice variety")
         print_info("Models will be downloaded to 'tts/' folder if not cached")
+        
+        # Note: Custom generator needs to be updated to accept pronunciations
+        print_warning("Note: Custom generator will use its built-in pronunciations")
         
         try:
             result = subprocess.run(
@@ -453,8 +513,8 @@ def generate_samples(wake_word: str, n_samples: int, base_dir: Path) -> bool:
             {"model": "tts_models/multilingual/multi-dataset/your_tts", "speaker": "female-en-5", "language": "en"},
         ]
         
-        # Pronunciation variations for the wake word
-        variations = [wake_word]
+        # Use user-provided pronunciations
+        variations = pronunciations
         
         # Check GPU availability
         try:
@@ -768,12 +828,27 @@ def main():
     print_header("Wake Word Configuration")
     wake_word = get_user_input("Enter wake word to train", default="homie")
     
+    # Step 3.5: Get pronunciation variations
+    if get_yes_no("\nAdd custom pronunciation variations?", default=True):
+        pronunciations = get_pronunciations(wake_word)
+    else:
+        pronunciations = [wake_word]
+        print_info(f"Using single pronunciation: {wake_word}")
+    
     # Step 4: Test sample generation
-    if get_yes_no("Generate test sample for verification?", default=True):
-        if not test_sample_generation(wake_word, base_dir):
-            if not get_yes_no("Continue anyway?", default=False):
+    if get_yes_no("\nGenerate test samples for verification?", default=True):
+        approved_pronunciations = test_sample_generation(wake_word, pronunciations, base_dir)
+        
+        if not approved_pronunciations:
+            print_error("No pronunciations approved!")
+            if not get_yes_no("Continue anyway with original wake word?", default=False):
                 print_info("Training cancelled")
                 sys.exit(0)
+            approved_pronunciations = [wake_word]
+        
+        pronunciations = approved_pronunciations
+    
+    print_success(f"\nUsing {len(pronunciations)} pronunciation(s) for training")
     
     # Step 5: Get training parameters
     print_header("Training Parameters")
@@ -799,6 +874,7 @@ def main():
     # Step 6: Confirm settings
     print_header("Configuration Summary")
     print(f"{Colors.BOLD}Wake Word:{Colors.ENDC} {wake_word}")
+    print(f"{Colors.BOLD}Pronunciations:{Colors.ENDC} {', '.join(pronunciations)}")
     print(f"{Colors.BOLD}Samples:{Colors.ENDC} {n_samples}")
     print(f"{Colors.BOLD}Training Steps:{Colors.ENDC} {training_steps}")
     print(f"{Colors.BOLD}False Activation Penalty:{Colors.ENDC} {false_activation_penalty}")
@@ -819,7 +895,7 @@ def main():
     )
     
     # Step 8: Generate samples
-    if not generate_samples(wake_word, n_samples, base_dir):
+    if not generate_samples(wake_word, pronunciations, n_samples, base_dir):
         print_error("Sample generation failed")
         if not get_yes_no("Continue with existing samples?", default=False):
             sys.exit(1)
