@@ -1,0 +1,77 @@
+# OpenWakeWord Custom Training Environment
+# Python 3.11.x required
+# Tested on Windows with CUDA 12.4
+
+# ===== Core TTS and Speech Processing =====
+TTS>=0.22.0
+piper-tts
+webrtcvad
+pronouncing==0.2.0
+deep-phonemizer==0.0.19
+
+# ===== PyTorch (CUDA) =====
+# Install separately with: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+torch>=2.0.0
+torchvision
+torchaudio
+
+# ===== Audio Processing and Augmentation =====
+audiomentations==0.33.0
+torch-audiomentations==0.11.0
+acoustics==0.2.6
+speechbrain==0.5.14
+mutagen==1.47.0
+librosa
+soundfile
+resampy
+
+# ===== Scientific Computing =====
+numpy<2.0,>=1.21
+scipy>=1.13,<1.17
+pandas
+
+# ===== Machine Learning and Training =====
+torchinfo==1.8.0
+torchmetrics==1.2.0
+datasets==2.14.6
+
+# ===== Model Export and Conversion =====
+onnx==1.14.1
+onnxruntime==1.22.1
+onnxsim
+onnx-graphsurgeon
+sng4onnx
+onnx2tf>=1.28.0
+
+# For TFLite conversion (optional, has compatibility issues)
+# tensorflow>=2.20.0
+# tf-keras>=2.20.0
+# tensorflow-probability>=0.25.0
+
+# ===== Utilities =====
+tqdm
+pyyaml
+requests
+pillow
+attrs
+
+# ===== Development Tools (optional) =====
+ipython
+jupyter
+
+# ===== Notes =====
+# 1. Install PyTorch with CUDA first:
+#    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+#
+# 2. For Windows: audiomentations 0.33.0 is used (no output_type parameter needed)
+#
+# 3. TFLite conversion is optional and has dependency conflicts
+#    ONNX format works perfectly with OpenWakeWord and Home Assistant
+#
+# 4. Tested configuration:
+#    - Python 3.11.x
+#    - Windows 11
+#    - NVIDIA GPU with CUDA 12.4
+#    - audiomentations 0.33.0 (stable on Windows)
+#    - numpy 1.26.4 (compatible with all dependencies)
+#    - scipy 1.16.3 (works with audiomentations 0.33.0)
