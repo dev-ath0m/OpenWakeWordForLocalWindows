@@ -264,7 +264,7 @@ def check_background_datasets(base_dir: Path) -> dict:
     print_header("Checking Background Datasets")
     print_info("These improve model quality but are optional (training works without them)")
     
-    # Check MIT RIRs
+    # Check MIT RIRs (direct download)
     mit_rirs_path = base_dir / "mit_rirs"
     mit_rirs_path.mkdir(exist_ok=True)
     mit_rirs_count = len(list(mit_rirs_path.glob("*.wav")))
@@ -273,6 +273,16 @@ def check_background_datasets(base_dir: Path) -> dict:
         print_warning(f"MIT RIRs - missing or incomplete ({mit_rirs_count}/271 files)")
     else:
         print_success(f"MIT RIRs - {mit_rirs_count} files")
+    
+    # Check MIT Environmental (HuggingFace - used in original Colab)
+    mit_env_path = base_dir / "MIT_environmental_impulse_responses"
+    mit_env_path.mkdir(exist_ok=True)
+    mit_env_count = len(list(mit_env_path.glob("*.wav")))
+    
+    if mit_env_count < 250:
+        print_warning(f"MIT Environmental - missing or incomplete ({mit_env_count} files)")
+    else:
+        print_success(f"MIT Environmental - {mit_env_count} files")
     
     # Check FMA
     fma_path = base_dir / "fma"
@@ -298,6 +308,8 @@ def check_background_datasets(base_dir: Path) -> dict:
     missing = []
     if mit_rirs_count < 250:
         missing.append('mit_rirs')
+    if mit_env_count < 250:
+        missing.append('mit_environmental')
     if fma_count < 100:
         missing.append('fma')
     if audioset_count < 100:
@@ -306,12 +318,20 @@ def check_background_datasets(base_dir: Path) -> dict:
     if missing:
         print()
         if get_yes_no("Download optional datasets now? This improves model quality", default=False):
-            # Download MIT RIRs (small, quick)
+            # Download MIT RIRs (small, quick - direct from MIT)
             if 'mit_rirs' in missing:
                 print_info("\nDownloading MIT Room Impulse Responses (~50MB)...")
                 if download_mit_rirs(mit_rirs_path):
                     mit_rirs_count = len(list(mit_rirs_path.glob("*.wav")))
                     print_success(f"MIT RIRs downloaded: {mit_rirs_count} files")
+            
+            # Download MIT Environmental (from HuggingFace - matches original Colab)
+            if 'mit_environmental' in missing:
+                print_info("\nDownloading MIT Environmental Impulse Responses from HuggingFace (~300MB)...")
+                print_info("This matches the original Colab training notebook")
+                if download_mit_environmental(mit_env_path):
+                    mit_env_count = len(list(mit_env_path.glob("*.wav")))
+                    print_success(f"MIT Environmental downloaded: {mit_env_count} files")
             
             # Download FMA (larger)
             if 'fma' in missing:
@@ -383,6 +403,7 @@ def check_background_datasets(base_dir: Path) -> dict:
     
     return {
         'mit_rirs': mit_rirs_count >= 250,
+        'mit_environmental': mit_env_count >= 250,
         'fma': fma_count >= 100,
         'audioset': audioset_count >= 100
     }
@@ -409,6 +430,45 @@ def download_mit_rirs(output_path: Path) -> bool:
     except Exception as e:
         print_error(f"Failed to download MIT RIRs: {e}")
         print_info("You can download manually from: https://mcdermottlab.mit.edu/Reverb/IR_Survey.html")
+        return False
+
+def download_mit_environmental(output_path: Path) -> bool:
+    """Download MIT Environmental Impulse Responses from HuggingFace (~300MB)"""
+    try:
+        print_info("Loading HuggingFace datasets library...")
+        import datasets
+        from scipy.io import wavfile
+        import numpy as np
+        from tqdm import tqdm
+        
+        print_info("Downloading MIT Environmental dataset from HuggingFace...")
+        print_info("This uses the same dataset as the original Colab training notebook")
+        
+        # Load dataset from HuggingFace (streaming to avoid loading all in memory)
+        rir_dataset = datasets.load_dataset(
+            "davidscripka/MIT_environmental_impulse_responses",
+            split="train",
+            streaming=True
+        )
+        
+        # Save clips to 16-bit PCM wav files
+        file_count = 0
+        for row in tqdm(rir_dataset, desc="Downloading files"):
+            name = row['audio']['path'].split('/')[-1]
+            output_file = output_path / name
+            
+            # Convert float32 to int16 PCM format
+            audio_data = (row['audio']['array'] * 32767).astype(np.int16)
+            wavfile.write(str(output_file), 16000, audio_data)
+            file_count += 1
+        
+        print_success(f"Downloaded {file_count} MIT Environmental files")
+        return True
+        
+    except Exception as e:
+        print_error(f"Failed to download MIT Environmental: {e}")
+        print_info("Make sure 'datasets' package is installed: pip install datasets")
+        print_info("This dataset is optional but matches the original Colab training")
         return False
 
 def download_fma(output_path: Path, size: str) -> bool:
@@ -877,7 +937,10 @@ def create_training_config(
         
         # Paths - must match what train.py expects
         'output_dir': str(output_dir),
-        'rir_paths': [str(base_dir / "mit_rirs")],
+        'rir_paths': [
+            str(base_dir / "mit_rirs"),
+            str(base_dir / "MIT_environmental_impulse_responses")
+        ],
         'background_paths': [
             str(base_dir / "audioset_16k"),
             str(base_dir / "fma")

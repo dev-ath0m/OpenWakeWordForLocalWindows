@@ -177,6 +177,7 @@ Both the setup script and training script will **offer to download** these datas
 | Dataset | Purpose | Size | Auto-Download |
 |---------|---------|------|---------------|
 | **mit_rirs** | Room impulse responses (reverb simulation) | ~50 MB (271 files) | ✅ Yes |
+| **mit_environmental** | MIT Environmental Impulse Responses (HuggingFace) | ~300 MB | ✅ Yes |
 | **fma** | Background music (Free Music Archive) | 7.2 GB - 22 GB | ✅ Yes |
 | **audioset_16k** | Background noise (speech, environmental sounds) | 20-50 GB (~40K files) | ⚠️ Yes (6-24 hours) |
 
@@ -184,7 +185,8 @@ Both the setup script and training script will **offer to download** these datas
 
 **During Setup (SETUP_COMPLETE.ps1):**
 - Script checks if datasets are present
-- Offers to download MIT RIRs (~50MB) - quick download
+- Offers to download MIT RIRs (~50MB) - direct from MIT
+- Offers to download MIT Environmental dataset (~300MB) - from HuggingFace (used in original Colab)
 - Offers choice between FMA small (7.2GB) or medium (22GB)
 - Offers AudioSet Balanced+Eval download (20-50GB, requires yt-dlp)
 
@@ -197,9 +199,16 @@ Both the setup script and training script will **offer to download** these datas
 ### What Each Dataset Does
 
 **MIT RIRs (Room Impulse Responses):**
-- **Purpose**: Simulates different room acoustics and reverb
+- **Purpose**: Simulates different room acoustics and reverb (271 files from various spaces)
 - **Impact**: Makes model robust to different environments (bathroom, living room, etc.)
+- **Source**: Direct download from MIT McDermott Lab
 - **Recommendation**: Quick download, worth having
+
+**MIT Environmental (HuggingFace dataset):**
+- **Purpose**: Additional environmental impulse responses (used in original Colab training)
+- **Impact**: Provides even more reverb variations for training
+- **Source**: HuggingFace dataset `davidscripka/MIT_environmental_impulse_responses`
+- **Recommendation**: Download for maximum authenticity to original training process
 
 **FMA (Free Music Archive):**
 - **Purpose**: Background music for training robustness
