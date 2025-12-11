@@ -384,7 +384,7 @@ def create_training_config(
     return config_file
 
 def generate_samples(wake_word: str, n_samples: int, base_dir: Path) -> bool:
-    """Generate TTS samples for training"""
+    """Generate TTS samples for training using multiple models with automatic downloading"""
     print_header("Generating TTS Samples")
     
     model_name = wake_word.lower().replace(' ', '_')
@@ -394,39 +394,172 @@ def generate_samples(wake_word: str, n_samples: int, base_dir: Path) -> bool:
     print_info(f"Generating {n_samples} samples for '{wake_word}'")
     print_info(f"Output directory: {clips_dir}")
     
-    # Import and run sample generator
-    try:
-        # Check if custom generator exists
-        generator_script = base_dir / "generate_samples_coqui.py"
-        if generator_script.exists():
-            print_info("Using custom sample generator (generate_samples_coqui.py)")
+    # Check if custom generator exists (provides more control and variety)
+    generator_script = base_dir / "generate_samples_coqui.py"
+    if generator_script.exists():
+        print_info("Using custom multi-model generator (generate_samples_coqui.py)")
+        print_info("This will use 6 different TTS models for maximum voice variety")
+        print_info("Models will be downloaded to 'tts/' folder if not cached")
+        
+        try:
             result = subprocess.run(
                 [sys.executable, str(generator_script), 
-                 '--wake-word', wake_word,
-                 '--samples', str(n_samples),
-                 '--output', str(clips_dir)],
+                 '--samples', str(n_samples)],
                 cwd=str(base_dir),
                 capture_output=False
             )
-            return result.returncode == 0
-        else:
-            # Use piper-sample-generator
-            print_info("Using piper-sample-generator")
-            piper_gen = base_dir / "piper-sample-generator" / "generate_samples.py"
-            if piper_gen.exists():
-                result = subprocess.run(
-                    [sys.executable, str(piper_gen),
-                     '--wake-word', wake_word,
-                     '--number', str(n_samples),
-                     '--output-dir', str(clips_dir)],
-                    cwd=str(base_dir),
-                    capture_output=False
-                )
-                return result.returncode == 0
+            
+            if result.returncode == 0:
+                # Move generated samples to target directory
+                source_clips = base_dir / "clips"
+                if source_clips.exists():
+                    import shutil
+                    for item in source_clips.iterdir():
+                        if item.is_dir():
+                            dest = clips_dir / item.name
+                            if dest.exists():
+                                shutil.rmtree(dest)
+                            shutil.move(str(item), str(dest))
+                        elif item.suffix == '.wav':
+                            shutil.move(str(item), str(clips_dir / item.name))
+                return True
             else:
-                print_error("No sample generator found")
-                return False
+                print_warning("Custom generator failed, trying built-in method...")
+        except Exception as e:
+            print_warning(f"Custom generator error: {e}")
+            print_info("Falling back to built-in sample generation...")
+    
+    # Built-in sample generation with multiple TTS models
+    print_info("Using built-in multi-model TTS generator")
+    print_info("Models will be downloaded and cached in 'tts/' folder automatically")
+    
+    try:
+        from TTS.api import TTS
+        import librosa
+        from scipy.io import wavfile
+        import numpy as np
+        
+        # Set TTS cache directory
+        import os
+        os.environ['TTS_HOME'] = str(base_dir)
+        
+        # TTS models to use for variety
+        tts_models = [
+            {"model": "tts_models/en/ljspeech/tacotron2-DDC", "gender": "female"},
+            {"model": "tts_models/en/ljspeech/glow-tts", "gender": "female"},
+            {"model": "tts_models/en/ljspeech/fast_pitch", "gender": "female"},
+            {"model": "tts_models/en/jenny/jenny", "gender": "female"},
+            {"model": "tts_models/multilingual/multi-dataset/your_tts", "speaker": "male-en-2", "language": "en"},
+            {"model": "tts_models/multilingual/multi-dataset/your_tts", "speaker": "female-en-5", "language": "en"},
+        ]
+        
+        # Pronunciation variations for the wake word
+        variations = [wake_word]
+        
+        # Check GPU availability
+        try:
+            import torch
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        except ImportError:
+            device = "cpu"
+        
+        samples_per_combo = n_samples // (len(tts_models) * len(variations))
+        
+        print_info(f"Using {len(tts_models)} TTS models with {len(variations)} pronunciations")
+        print_info(f"Generating ~{samples_per_combo} samples per combination")
+        print_info(f"Device: {device.upper()}")
+        
+        valid_count = 0
+        
+        for model_config in tts_models:
+            model_path = model_config["model"]
+            model_short = model_path.split('/')[-1]
+            
+            print_info(f"\nLoading model: {model_short}...")
+            try:
+                tts = TTS(model_name=model_path).to(device)
                 
+                for variation in variations:
+                    # Create subfolder for this model/variation
+                    gender = model_config.get("gender", "voice")
+                    speaker = model_config.get("speaker", "")
+                    speaker_suffix = f"_{speaker}" if speaker else ""
+                    subfolder = clips_dir / f"{model_short}{speaker_suffix}_{gender}" / variation.replace(" ", "_")
+                    subfolder.mkdir(parents=True, exist_ok=True)
+                    
+                    # Generate samples for this combination
+                    for i in range(samples_per_combo):
+                        output_file = subfolder / f"{model_name}_{valid_count}.wav"
+                        
+                        try:
+                            # Generate with slight speed variation
+                            speed = 1.0 + np.random.uniform(-0.1, 0.1)
+                            
+                            kwargs = {
+                                'text': variation,
+                                'file_path': str(output_file),
+                                'speed': speed
+                            }
+                            
+                            if 'speaker' in model_config:
+                                kwargs['speaker'] = model_config['speaker']
+                            if 'language' in model_config:
+                                kwargs['language'] = model_config['language']
+                            
+                            tts.tts_to_file(**kwargs)
+                            
+                            # Validate and process
+                            sr, audio = wavfile.read(str(output_file))
+                            duration = len(audio) / sr
+                            
+                            # Skip if too long
+                            if duration > 3.0:
+                                output_file.unlink()
+                                continue
+                            
+                            # Trim silence
+                            audio_float = audio.astype(np.float32)
+                            audio_trimmed, _ = librosa.effects.trim(audio_float, top_db=30)
+                            
+                            # Resample to 16kHz if needed
+                            if sr != 16000:
+                                from scipy import signal
+                                num_samples = int(len(audio_trimmed) * 16000 / sr)
+                                audio_resampled = signal.resample(audio_trimmed, num_samples)
+                                audio = audio_resampled.astype(np.int16)
+                            else:
+                                audio = audio_trimmed.astype(np.int16)
+                            
+                            # Save final version
+                            wavfile.write(str(output_file), 16000, audio)
+                            valid_count += 1
+                            
+                            if valid_count % 50 == 0:
+                                print_info(f"Generated {valid_count}/{n_samples} samples...")
+                                
+                        except Exception as e:
+                            print_warning(f"Sample generation error: {e}")
+                            if output_file.exists():
+                                output_file.unlink()
+                            continue
+                        
+                        if valid_count >= n_samples:
+                            break
+                    
+                    if valid_count >= n_samples:
+                        break
+                        
+            except Exception as e:
+                print_warning(f"Model {model_short} failed: {e}")
+                continue
+            
+            if valid_count >= n_samples:
+                break
+        
+        print_success(f"\nGenerated {valid_count} valid samples")
+        print_info(f"TTS models cached in: {base_dir / 'tts'}")
+        return valid_count > 0
+        
     except Exception as e:
         print_error(f"Sample generation failed: {e}")
         return False

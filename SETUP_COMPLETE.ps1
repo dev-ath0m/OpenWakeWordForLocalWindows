@@ -33,7 +33,22 @@ Write-Host "`nCreating virtual environment..." -ForegroundColor Yellow
 if (Test-Path "wakeword_env") {
     Write-Host "[OK] Virtual environment already exists" -ForegroundColor Green
 } else {
-    python -m venv wakeword_env
+    # Show progress bar during venv creation
+    $job = Start-Job -ScriptBlock { param($pythonPath) & $pythonPath -m venv wakeword_env } -ArgumentList (Get-Command python).Source
+    
+    $i = 0
+    while ($job.State -eq 'Running') {
+        $progress = ($i % 10) + 1
+        Write-Progress -Activity "Creating virtual environment" -Status "Setting up Python environment..." -PercentComplete ($progress * 10)
+        Start-Sleep -Milliseconds 500
+        $i++
+    }
+    
+    Wait-Job $job | Out-Null
+    Receive-Job $job | Out-Null
+    Remove-Job $job
+    Write-Progress -Activity "Creating virtual environment" -Completed
+    
     Write-Host "[OK] Virtual environment created" -ForegroundColor Green
 }
 
@@ -43,22 +58,88 @@ Write-Host "`nActivating virtual environment..." -ForegroundColor Yellow
 
 # Upgrade pip
 Write-Host "`nUpgrading pip..." -ForegroundColor Yellow
-python -m pip install --upgrade pip wheel setuptools
+python -m pip install --upgrade pip wheel setuptools --quiet
+Write-Host "[OK] pip, wheel, and setuptools upgraded" -ForegroundColor Green
 
 # Install PyTorch with CUDA support
 Write-Host "`nInstalling PyTorch with CUDA 12.4..." -ForegroundColor Yellow
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+Write-Host "This may take several minutes (downloading ~2GB)..." -ForegroundColor Gray
+
+$job = Start-Job -ScriptBlock {
+    & pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124 --quiet
+}
+
+$i = 0
+while ($job.State -eq 'Running') {
+    $progress = ($i % 9) * 10 + 10
+    Write-Progress -Activity "Installing PyTorch" -Status "Downloading and installing (~2GB)..." -PercentComplete $progress
+    Start-Sleep -Seconds 2
+    $i++
+}
+
+Wait-Job $job | Out-Null
+$jobOutput = Receive-Job $job
+Remove-Job $job
+Write-Progress -Activity "Installing PyTorch" -Completed
+
+if ($LASTEXITCODE -eq 0 -or -not $LASTEXITCODE) {
+    Write-Host "[OK] PyTorch with CUDA 12.4 installed" -ForegroundColor Green
+} else {
+    Write-Host "[ERROR] PyTorch installation failed" -ForegroundColor Red
+    Write-Host $jobOutput -ForegroundColor Red
+    exit 1
+}
 
 # Install other dependencies
 Write-Host "`nInstalling dependencies from requirements.txt..." -ForegroundColor Yellow
-pip install -r requirements.txt
+Write-Host "This may take 5-10 minutes..." -ForegroundColor Gray
+
+$job = Start-Job -ScriptBlock {
+    & pip install -r requirements.txt --quiet
+}
+
+$i = 0
+while ($job.State -eq 'Running') {
+    $progress = ($i % 9) * 10 + 10
+    Write-Progress -Activity "Installing Dependencies" -Status "Installing Python packages from requirements.txt..." -PercentComplete $progress
+    Start-Sleep -Seconds 2
+    $i++
+}
+
+Wait-Job $job | Out-Null
+$jobOutput = Receive-Job $job
+Remove-Job $job
+Write-Progress -Activity "Installing Dependencies" -Completed
+
+if ($LASTEXITCODE -eq 0 -or -not $LASTEXITCODE) {
+    Write-Host "[OK] All dependencies installed" -ForegroundColor Green
+} else {
+    Write-Host "[WARNING] Some dependencies may have failed to install" -ForegroundColor Yellow
+    Write-Host $jobOutput -ForegroundColor Gray
+}
 
 # Clone OpenWakeWord repository if not exists
 Write-Host "`nSetting up OpenWakeWord..." -ForegroundColor Yellow
 if (Test-Path "openwakeword") {
     Write-Host "[OK] OpenWakeWord directory already exists" -ForegroundColor Green
 } else {
-    git clone https://github.com/dscripka/openwakeword.git
+    $job = Start-Job -ScriptBlock {
+        git clone https://github.com/dscripka/openwakeword.git 2>&1
+    }
+    
+    $i = 0
+    while ($job.State -eq 'Running') {
+        $progress = ($i % 9) * 10 + 10
+        Write-Progress -Activity "Cloning OpenWakeWord" -Status "Downloading from GitHub..." -PercentComplete $progress
+        Start-Sleep -Milliseconds 500
+        $i++
+    }
+    
+    Wait-Job $job | Out-Null
+    Receive-Job $job | Out-Null
+    Remove-Job $job
+    Write-Progress -Activity "Cloning OpenWakeWord" -Completed
+    
     Write-Host "[OK] OpenWakeWord cloned" -ForegroundColor Green
 }
 
