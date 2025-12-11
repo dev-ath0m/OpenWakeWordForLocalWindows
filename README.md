@@ -48,6 +48,10 @@ The setup script will:
 - ✅ Detect NVIDIA GPU and CUDA
 - ✅ Create virtual environment
 - ✅ Install PyTorch with CUDA 12.4 support
+- ✅ Install all dependencies
+- ✅ Clone OpenWakeWord repository
+- ✅ Download required training features (ACAV100M, validation sets)
+- ✅ Check for optional background datasets (audioset_16k, fma, mit_rirs)
 - ✅ Install all dependencies with compatible versions
 - ✅ Clone OpenWakeWord repository
 - ✅ Create necessary directories
@@ -146,18 +150,97 @@ D:\Homeassistant\
 │       └── homie.tflite            # Trained model (TFLite format, optional)
 ├── test_model/                      # Quick test output
 │   └── homie_test.onnx             # Test model (200 KB)
-├── audioset_16k/                    # Background noise dataset (auto-downloaded)
-├── fma/                             # Music dataset (auto-downloaded)
-├── mit_rirs/                        # Room impulse responses (auto-downloaded)
+├── audioset_16k/                    # OPTIONAL: Background noise dataset (speech, sounds)
+├── fma/                             # OPTIONAL: Music dataset (Free Music Archive)
+├── mit_rirs/                        # OPTIONAL: Room impulse responses (reverb simulation)
+│
+├── openwakeword_features_ACAV100M_2000_hrs_16bit.npy  # Required: Downloaded by setup (~4.7GB)
+├── validation_set_features.npy                         # Required: Downloaded by setup (~56MB)
 │
 ├── requirements.txt                 # Python dependencies
 ├── SETUP_COMPLETE.ps1              # Automated setup script
-├── train_houwme_wakeword.py        # Main training script
-├── generate_samples_coqui.py       # TTS sample generation
+├── train_wakeword_automated.py     # Automated training workflow
+├── generate_samples_coqui.py       # TTS sample generation (legacy)
 ├── test_train.yaml                 # Test training configuration
 ├── my_model.yaml                   # Full training configuration
-└── README_SETUP.md                 # This file
+└── README.md                       # This file
 ```
+
+## Optional Background Datasets (For Improved Model Quality)
+
+The training process can use optional background datasets to improve model robustness. **These are NOT required** - training will work without them using synthetic augmentation only.
+
+### Automatic Download Available
+
+Both the setup script and training script will **offer to download** these datasets automatically:
+
+| Dataset | Purpose | Size | Auto-Download |
+|---------|---------|------|---------------|
+| **mit_rirs** | Room impulse responses (reverb simulation) | ~50 MB (271 files) | ✅ Yes |
+| **fma** | Background music (Free Music Archive) | 7.2 GB - 22 GB | ✅ Yes |
+| **audioset_16k** | Background noise (speech, environmental sounds) | Manual setup | ❌ Complex (requires YouTube) |
+
+### How It Works
+
+**During Setup (SETUP_COMPLETE.ps1):**
+- Script checks if datasets are present
+- Offers to download MIT RIRs (~50MB) - quick download
+- Offers choice between FMA small (7.2GB) or medium (22GB)
+- Provides guidance for AudioSet (manual YouTube extraction required)
+
+**During Training (train_wakeword_automated.py):**
+- Same automatic download options
+- Downloads include progress bars
+- Graceful fallback if downloads fail
+
+### What Each Dataset Does
+
+**MIT RIRs (Room Impulse Responses):**
+- **Purpose**: Simulates different room acoustics and reverb
+- **Impact**: Makes model robust to different environments (bathroom, living room, etc.)
+- **Recommendation**: Quick download, worth having
+
+**FMA (Free Music Archive):**
+- **Purpose**: Background music for training robustness
+- **Impact**: Reduces false triggers when music is playing
+- **Recommendation**: fma_small (7.2GB) is sufficient for most cases
+
+**AudioSet:**
+- **Purpose**: Real-world background noise (speech, traffic, nature, etc.)
+- **Impact**: Improves robustness to environmental noise
+- **Recommendation**: Skip unless you need maximum quality (complex setup)
+
+### When to Download
+
+**Download them if:**
+- You want **highest quality** models
+- Your wake word will be used in **noisy environments**
+- You have **disk space** (7-22 GB for FMA)
+- You want **maximum robustness** to music/background sounds
+
+**Skip them if:**
+- You're doing a **quick test**
+- **Disk space** is limited
+- You want **faster setup**
+- Your environment is **relatively quiet**
+
+### Manual Download (Optional)
+
+If automatic download fails, you can download manually:
+
+1. **MIT Room Impulse Responses**
+   - Download: https://mcdermottlab.mit.edu/Reverb/IR_Survey.html
+   - Extract WAV files to `mit_rirs/` directory
+
+2. **FMA (Free Music Archive)**
+   - Download: https://github.com/mdeff/fma
+   - Choose fma_small.zip (7.2 GB) or fma_medium.zip (22 GB)
+   - Extract to `fma/` directory
+
+3. **AudioSet**
+   - Info: https://research.google.com/audioset/download.html
+   - Requires downloading YouTube videos and extracting audio
+   - Complex process, skip unless absolutely needed
 
 ## Training Configuration
 

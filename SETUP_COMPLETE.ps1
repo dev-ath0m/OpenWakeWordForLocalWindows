@@ -153,6 +153,217 @@ Write-Host "`nCreating directories..." -ForegroundColor Yellow
 }
 Write-Host "[OK] Directories ready" -ForegroundColor Green
 
+# Download training features (ACAV100M and validation)
+Write-Host "`nDownloading training features..." -ForegroundColor Yellow
+
+$acav100mFile = "openwakeword_features_ACAV100M_2000_hrs_16bit.npy"
+$validationFile = "validation_set_features.npy"
+$downloadErrors = @()
+
+if (-not (Test-Path $acav100mFile)) {
+    Write-Host "  Downloading ACAV100M features (~4.7GB)..." -ForegroundColor Gray
+    Write-Host "  This may take 10-30 minutes depending on your connection" -ForegroundColor Gray
+    
+    $acav100mUrl = "https://huggingface.co/datasets/davidscripka/openwakeword_features/resolve/main/openwakeword_features_ACAV100M_2000_hrs_16bit.npy"
+    
+    try {
+        $ProgressPreference = 'SilentlyContinue'  # Disable progress bar for faster download
+        Invoke-WebRequest -Uri $acav100mUrl -OutFile $acav100mFile -UseBasicParsing
+        $ProgressPreference = 'Continue'
+        
+        # Verify file was downloaded and is not empty
+        if ((Test-Path $acav100mFile) -and ((Get-Item $acav100mFile).Length -gt 0)) {
+            Write-Host "  [OK] ACAV100M features downloaded" -ForegroundColor Green
+        } else {
+            throw "Downloaded file is empty or invalid"
+        }
+    } catch {
+        Write-Host "  [ERROR] Failed to download ACAV100M features: $_" -ForegroundColor Red
+        if (Test-Path $acav100mFile) {
+            Remove-Item $acav100mFile -Force  # Remove partial/corrupted download
+        }
+        $downloadErrors += "ACAV100M features: $_"
+    }
+} else {
+    Write-Host "  [OK] ACAV100M features already present" -ForegroundColor Green
+}
+
+if (-not (Test-Path $validationFile)) {
+    Write-Host "  Downloading validation features (~56MB)..." -ForegroundColor Gray
+    
+    $validationUrl = "https://huggingface.co/datasets/davidscripka/openwakeword_features/resolve/main/validation_set_features.npy"
+    
+    try {
+        $ProgressPreference = 'SilentlyContinue'  # Disable progress bar for faster download
+        Invoke-WebRequest -Uri $validationUrl -OutFile $validationFile -UseBasicParsing
+        $ProgressPreference = 'Continue'
+        
+        # Verify file was downloaded and is not empty
+        if ((Test-Path $validationFile) -and ((Get-Item $validationFile).Length -gt 0)) {
+            Write-Host "  [OK] Validation features downloaded" -ForegroundColor Green
+        } else {
+            throw "Downloaded file is empty or invalid"
+        }
+    } catch {
+        Write-Host "  [ERROR] Failed to download validation features: $_" -ForegroundColor Red
+        if (Test-Path $validationFile) {
+            Remove-Item $validationFile -Force  # Remove partial/corrupted download
+        }
+        $downloadErrors += "Validation features: $_"
+    }
+} else {
+    Write-Host "  [OK] Validation features already present" -ForegroundColor Green
+}
+
+# Check if downloads failed
+if ($downloadErrors.Count -gt 0) {
+    Write-Host "`n[ERROR] Failed to download required training features:" -ForegroundColor Red
+    foreach ($error in $downloadErrors) {
+        Write-Host "  - $error" -ForegroundColor Red
+    }
+    Write-Host "`nYou can try:" -ForegroundColor Yellow
+    Write-Host "  1. Check your internet connection" -ForegroundColor Gray
+    Write-Host "  2. Download manually from:" -ForegroundColor Gray
+    Write-Host "     ACAV100M: $acav100mUrl" -ForegroundColor Gray
+    Write-Host "     Validation: $validationUrl" -ForegroundColor Gray
+    Write-Host "  3. Run the setup again to retry download" -ForegroundColor Gray
+    Write-Host "`n[WARNING] Setup completed with errors - training may not work optimally" -ForegroundColor Yellow
+} else {
+    Write-Host "[OK] Training features ready" -ForegroundColor Green
+}
+
+# Download/check optional background datasets for improved model quality
+Write-Host "`nChecking optional background datasets..." -ForegroundColor Yellow
+Write-Host "These improve model quality but are optional (training works without them)" -ForegroundColor Gray
+
+$datasetsToDownload = @()
+
+# Check MIT RIRs (Room Impulse Responses) - 271 files, ~50MB
+$mitRirsPath = "mit_rirs"
+if (-not (Test-Path $mitRirsPath)) {
+    New-Item -ItemType Directory -Path $mitRirsPath | Out-Null
+}
+$mitRirsCount = (Get-ChildItem -Path $mitRirsPath -Filter "*.wav" -ErrorAction SilentlyContinue | Measure-Object).Count
+if ($mitRirsCount -lt 250) {
+    Write-Host "  [!] MIT RIRs - missing or incomplete ($mitRirsCount/271 files)" -ForegroundColor Yellow
+    $datasetsToDownload += "mit_rirs"
+} else {
+    Write-Host "  [OK] MIT RIRs - $mitRirsCount files" -ForegroundColor Green
+}
+
+# Check FMA (Free Music Archive) - recommend fma_small (8000 tracks, 7.2GB)
+$fmaPath = "fma"
+if (-not (Test-Path $fmaPath)) {
+    New-Item -ItemType Directory -Path $fmaPath | Out-Null
+}
+$fmaCount = (Get-ChildItem -Path $fmaPath -Filter "*.mp3" -Recurse -ErrorAction SilentlyContinue | Measure-Object).Count
+if ($fmaCount -lt 100) {
+    Write-Host "  [!] FMA music - missing or incomplete ($fmaCount files)" -ForegroundColor Yellow
+    $datasetsToDownload += "fma"
+} else {
+    Write-Host "  [OK] FMA music - $fmaCount tracks" -ForegroundColor Green
+}
+
+# Check AudioSet (requires manual download from YouTube)
+$audiosetPath = "audioset_16k"
+if (-not (Test-Path $audiosetPath)) {
+    New-Item -ItemType Directory -Path $audiosetPath | Out-Null
+}
+$audiosetCount = (Get-ChildItem -Path $audiosetPath -Filter "*.wav" -Recurse -ErrorAction SilentlyContinue | Measure-Object).Count
+if ($audiosetCount -lt 100) {
+    Write-Host "  [!] AudioSet - missing or incomplete ($audiosetCount files)" -ForegroundColor Yellow
+} else {
+    Write-Host "  [OK] AudioSet - $audiosetCount files" -ForegroundColor Green
+}
+
+# Offer to download missing datasets
+if ($datasetsToDownload.Count -gt 0 -or $audiosetCount -lt 100) {
+    Write-Host ""
+    $downloadOptional = Read-Host "Download optional datasets now? This improves model quality. (y/N)"
+    
+    if ($downloadOptional -eq 'y' -or $downloadOptional -eq 'Y') {
+        # Download MIT RIRs (small, quick download)
+        if ($datasetsToDownload -contains "mit_rirs") {
+            Write-Host "`n  Downloading MIT Room Impulse Responses (~50MB)..." -ForegroundColor Cyan
+            try {
+                $mitRirsUrl = "https://mcdermottlab.mit.edu/Reverb/IRMAudio/Audio.zip"
+                $mitRirsZip = "mit_rirs_temp.zip"
+                
+                $ProgressPreference = 'SilentlyContinue'
+                Invoke-WebRequest -Uri $mitRirsUrl -OutFile $mitRirsZip -UseBasicParsing
+                $ProgressPreference = 'Continue'
+                
+                Write-Host "    Extracting MIT RIRs..." -ForegroundColor Gray
+                Expand-Archive -Path $mitRirsZip -DestinationPath $mitRirsPath -Force
+                Remove-Item $mitRirsZip -Force
+                
+                $extractedCount = (Get-ChildItem -Path $mitRirsPath -Filter "*.wav" -Recurse | Measure-Object).Count
+                Write-Host "    [OK] MIT RIRs downloaded: $extractedCount files" -ForegroundColor Green
+            } catch {
+                Write-Host "    [ERROR] Failed to download MIT RIRs: $_" -ForegroundColor Red
+                Write-Host "    You can download manually from: https://mcdermottlab.mit.edu/Reverb/IR_Survey.html" -ForegroundColor Yellow
+            }
+        }
+        
+        # Download FMA small (larger download, ~7.2GB)
+        if ($datasetsToDownload -contains "fma") {
+            Write-Host "`n  FMA (Free Music Archive) download options:" -ForegroundColor Cyan
+            Write-Host "    1. fma_small (7.2 GB, 8,000 tracks) - Recommended" -ForegroundColor Gray
+            Write-Host "    2. fma_medium (22 GB, 25,000 tracks)" -ForegroundColor Gray
+            Write-Host "    3. Skip FMA download (you can add music files manually later)" -ForegroundColor Gray
+            $fmaChoice = Read-Host "  Choose option (1/2/3)"
+            
+            if ($fmaChoice -eq '1' -or $fmaChoice -eq '2') {
+                $fmaUrl = if ($fmaChoice -eq '1') { 
+                    "https://os.unil.cloud.switch.ch/fma/fma_small.zip"
+                } else { 
+                    "https://os.unil.cloud.switch.ch/fma/fma_medium.zip"
+                }
+                $fmaSize = if ($fmaChoice -eq '1') { "7.2 GB" } else { "22 GB" }
+                
+                Write-Host "`n  Downloading FMA ($fmaSize)..." -ForegroundColor Cyan
+                Write-Host "  This will take 10-60 minutes depending on your connection" -ForegroundColor Yellow
+                
+                try {
+                    $fmaZip = "fma_temp.zip"
+                    
+                    # Use background job for large download with progress
+                    Write-Host "  Starting download (this may take a while)..." -ForegroundColor Gray
+                    $ProgressPreference = 'SilentlyContinue'
+                    Invoke-WebRequest -Uri $fmaUrl -OutFile $fmaZip -UseBasicParsing
+                    $ProgressPreference = 'Continue'
+                    
+                    Write-Host "  Extracting FMA archive..." -ForegroundColor Gray
+                    Expand-Archive -Path $fmaZip -DestinationPath $fmaPath -Force
+                    Remove-Item $fmaZip -Force
+                    
+                    $extractedCount = (Get-ChildItem -Path $fmaPath -Filter "*.mp3" -Recurse | Measure-Object).Count
+                    Write-Host "  [OK] FMA downloaded: $extractedCount tracks" -ForegroundColor Green
+                } catch {
+                    Write-Host "  [ERROR] Failed to download FMA: $_" -ForegroundColor Red
+                    Write-Host "  You can download manually from: https://github.com/mdeff/fma" -ForegroundColor Yellow
+                }
+            } else {
+                Write-Host "  Skipped FMA download" -ForegroundColor Gray
+            }
+        }
+        
+        # AudioSet info (cannot auto-download, requires YouTube extraction)
+        if ($audiosetCount -lt 100) {
+            Write-Host ""`n  AudioSet requires manual setup:" -ForegroundColor Yellow
+            Write-Host "    AudioSet provides metadata but audio must be downloaded from YouTube" -ForegroundColor Gray
+            Write-Host "    This is complex and time-consuming - skip unless you need maximum quality" -ForegroundColor Gray
+            Write-Host "    More info: https://research.google.com/audioset/download.html" -ForegroundColor DarkGray
+        }
+    } else {
+        Write-Host "`n[INFO] Skipped optional dataset downloads" -ForegroundColor Cyan
+        Write-Host "Training will use synthetic augmentation (still produces good models)" -ForegroundColor Gray
+        Write-Host "You can download these datasets later to improve quality" -ForegroundColor Gray
+    }
+} else {
+    Write-Host "[OK] All background datasets available for high-quality training" -ForegroundColor Green
+}
+
 # Test PyTorch CUDA
 Write-Host "`nTesting PyTorch CUDA support..." -ForegroundColor Yellow
 $cudaTest = python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}'); print(f'CUDA device: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"None\"}'); print(f'PyTorch version: {torch.__version__}')" 2>&1

@@ -151,6 +151,275 @@ def check_dependencies() -> dict:
     
     return status
 
+def download_training_features(base_dir: Path) -> bool:
+    """Download ACAV100M and validation features from Hugging Face"""
+    print_header("Downloading Training Features")
+    
+    # Feature file URLs (from Hugging Face openwakeword_features dataset)
+    acav100m_url = "https://huggingface.co/datasets/davidscripka/openwakeword_features/resolve/main/openwakeword_features_ACAV100M_2000_hrs_16bit.npy"
+    validation_url = "https://huggingface.co/datasets/davidscripka/openwakeword_features/resolve/main/validation_set_features.npy"
+    
+    acav100m_file = base_dir / "openwakeword_features_ACAV100M_2000_hrs_16bit.npy"
+    validation_file = base_dir / "validation_set_features.npy"
+    
+    download_errors = []
+    
+    # Download ACAV100M features if not present
+    if not acav100m_file.exists():
+        print_info("Downloading ACAV100M features (~4.7GB)...")
+        print_info("This may take 10-30 minutes depending on your connection")
+        print_info(f"URL: {acav100m_url}")
+        
+        try:
+            import urllib.request
+            
+            def progress_callback(block_count, block_size, total_size):
+                if total_size > 0:
+                    downloaded = block_count * block_size
+                    percent = min(100, (downloaded / total_size) * 100)
+                    mb_downloaded = downloaded / (1024 * 1024)
+                    mb_total = total_size / (1024 * 1024)
+                    
+                    bar_width = 50
+                    filled = int(bar_width * downloaded / total_size)
+                    bar = '█' * filled + '░' * (bar_width - filled)
+                    
+                    print(f"\r{Colors.OKCYAN}[{bar}] {percent:5.1f}% | {mb_downloaded:6.1f}/{mb_total:.1f} MB{Colors.ENDC}", 
+                          end='', flush=True)
+            
+            urllib.request.urlretrieve(acav100m_url, str(acav100m_file), progress_callback)
+            print()  # New line after progress bar
+            
+            # Verify file was downloaded and is not empty
+            if acav100m_file.exists() and acav100m_file.stat().st_size > 0:
+                print_success(f"ACAV100M features downloaded: {acav100m_file}")
+            else:
+                raise Exception("Downloaded file is empty or invalid")
+                
+        except Exception as e:
+            print_error(f"Failed to download ACAV100M features: {e}")
+            if acav100m_file.exists():
+                acav100m_file.unlink()  # Remove partial/corrupted download
+            download_errors.append(f"ACAV100M features: {e}")
+    else:
+        print_success(f"ACAV100M features already present: {acav100m_file}")
+    
+    # Download validation features if not present
+    if not validation_file.exists():
+        print_info("Downloading validation features (~56MB)...")
+        print_info(f"URL: {validation_url}")
+        
+        try:
+            import urllib.request
+            
+            def progress_callback(block_count, block_size, total_size):
+                if total_size > 0:
+                    downloaded = block_count * block_size
+                    percent = min(100, (downloaded / total_size) * 100)
+                    mb_downloaded = downloaded / (1024 * 1024)
+                    mb_total = total_size / (1024 * 1024)
+                    
+                    bar_width = 50
+                    filled = int(bar_width * downloaded / total_size)
+                    bar = '█' * filled + '░' * (bar_width - filled)
+                    
+                    print(f"\r{Colors.OKCYAN}[{bar}] {percent:5.1f}% | {mb_downloaded:6.1f}/{mb_total:.1f} MB{Colors.ENDC}", 
+                          end='', flush=True)
+            
+            urllib.request.urlretrieve(validation_url, str(validation_file), progress_callback)
+            print()  # New line after progress bar
+            
+            # Verify file was downloaded and is not empty
+            if validation_file.exists() and validation_file.stat().st_size > 0:
+                print_success(f"Validation features downloaded: {validation_file}")
+            else:
+                raise Exception("Downloaded file is empty or invalid")
+                
+        except Exception as e:
+            print_error(f"Failed to download validation features: {e}")
+            if validation_file.exists():
+                validation_file.unlink()  # Remove partial/corrupted download
+            download_errors.append(f"Validation features: {e}")
+    else:
+        print_success(f"Validation features already present: {validation_file}")
+    
+    # Check if downloads failed
+    if download_errors:
+        print_error("\nFailed to download required training features:")
+        for error in download_errors:
+            print_error(f"  - {error}")
+        print_info("\nYou can try:")
+        print_info("  1. Check your internet connection")
+        print_info("  2. Download manually from:")
+        print_info(f"     ACAV100M: {acav100m_url}")
+        print_info(f"     Validation: {validation_url}")
+        print_info("  3. Run the script again to retry download")
+        return False
+    
+    print_success("\nAll training features ready!")
+    return True
+
+def check_background_datasets(base_dir: Path) -> dict:
+    """Check and optionally download background datasets for improved model quality"""
+    print_header("Checking Background Datasets")
+    print_info("These improve model quality but are optional (training works without them)")
+    
+    # Check MIT RIRs
+    mit_rirs_path = base_dir / "mit_rirs"
+    mit_rirs_path.mkdir(exist_ok=True)
+    mit_rirs_count = len(list(mit_rirs_path.glob("*.wav")))
+    
+    if mit_rirs_count < 250:
+        print_warning(f"MIT RIRs - missing or incomplete ({mit_rirs_count}/271 files)")
+    else:
+        print_success(f"MIT RIRs - {mit_rirs_count} files")
+    
+    # Check FMA
+    fma_path = base_dir / "fma"
+    fma_path.mkdir(exist_ok=True)
+    fma_count = len(list(fma_path.rglob("*.mp3")))
+    
+    if fma_count < 100:
+        print_warning(f"FMA music - missing or incomplete ({fma_count} files)")
+    else:
+        print_success(f"FMA music - {fma_count} tracks")
+    
+    # Check AudioSet
+    audioset_path = base_dir / "audioset_16k"
+    audioset_path.mkdir(exist_ok=True)
+    audioset_count = len(list(audioset_path.rglob("*.wav")))
+    
+    if audioset_count < 100:
+        print_warning(f"AudioSet - missing or incomplete ({audioset_count} files)")
+    else:
+        print_success(f"AudioSet - {audioset_count} files")
+    
+    # Offer to download if any are missing
+    missing = []
+    if mit_rirs_count < 250:
+        missing.append('mit_rirs')
+    if fma_count < 100:
+        missing.append('fma')
+    if audioset_count < 100:
+        missing.append('audioset')
+    
+    if missing:
+        print()
+        if get_yes_no("Download optional datasets now? This improves model quality", default=False):
+            # Download MIT RIRs (small, quick)
+            if 'mit_rirs' in missing:
+                print_info("\nDownloading MIT Room Impulse Responses (~50MB)...")
+                if download_mit_rirs(mit_rirs_path):
+                    mit_rirs_count = len(list(mit_rirs_path.glob("*.wav")))
+                    print_success(f"MIT RIRs downloaded: {mit_rirs_count} files")
+            
+            # Download FMA (larger)
+            if 'fma' in missing:
+                print_info("\nFMA (Free Music Archive) download options:")
+                print_info("  1. fma_small (7.2 GB, 8,000 tracks) - Recommended")
+                print_info("  2. fma_medium (22 GB, 25,000 tracks)")
+                print_info("  3. Skip FMA download (you can add music files manually later)")
+                
+                choice = get_user_input("Choose option", default="1")
+                
+                if choice in ['1', '2']:
+                    if download_fma(fma_path, choice):
+                        fma_count = len(list(fma_path.rglob("*.mp3")))
+                        print_success(f"FMA downloaded: {fma_count} tracks")
+                else:
+                    print_info("Skipped FMA download")
+            
+            # AudioSet info
+            if 'audioset' in missing:
+                print_info("\nAudioSet requires manual setup:")
+                print_info("  AudioSet provides metadata but audio must be downloaded from YouTube")
+                print_info("  This is complex and time-consuming - skip unless you need maximum quality")
+                print_info("  More info: https://research.google.com/audioset/download.html")
+        else:
+            print_info("\nSkipped optional dataset downloads")
+            print_info("Training will use synthetic augmentation (still produces good models)")
+            print_info("You can download these datasets later to improve quality")
+    else:
+        print_success("\nAll background datasets available for high-quality training!")
+    
+    return {
+        'mit_rirs': mit_rirs_count >= 250,
+        'fma': fma_count >= 100,
+        'audioset': audioset_count >= 100
+    }
+
+def download_mit_rirs(output_path: Path) -> bool:
+    """Download MIT Room Impulse Responses (~50MB, 271 files)"""
+    try:
+        import urllib.request
+        import zipfile
+        
+        url = "https://mcdermottlab.mit.edu/Reverb/IRMAudio/Audio.zip"
+        zip_file = output_path.parent / "mit_rirs_temp.zip"
+        
+        print_info("Downloading MIT RIRs...")
+        urllib.request.urlretrieve(url, str(zip_file))
+        
+        print_info("Extracting MIT RIRs...")
+        with zipfile.ZipFile(zip_file, 'r') as zip_ref:
+            zip_ref.extractall(output_path)
+        
+        zip_file.unlink()
+        return True
+        
+    except Exception as e:
+        print_error(f"Failed to download MIT RIRs: {e}")
+        print_info("You can download manually from: https://mcdermottlab.mit.edu/Reverb/IR_Survey.html")
+        return False
+
+def download_fma(output_path: Path, size: str) -> bool:
+    """Download FMA dataset (7.2GB for small, 22GB for medium)"""
+    try:
+        import urllib.request
+        import zipfile
+        
+        if size == '1':
+            url = "https://os.unil.cloud.switch.ch/fma/fma_small.zip"
+            size_str = "7.2 GB"
+        else:
+            url = "https://os.unil.cloud.switch.ch/fma/fma_medium.zip"
+            size_str = "22 GB"
+        
+        zip_file = output_path.parent / "fma_temp.zip"
+        
+        print_info(f"Downloading FMA ({size_str})...")
+        print_info("This will take 10-60 minutes depending on your connection")
+        print_info("Starting download (this may take a while)...")
+        
+        def progress_callback(block_count, block_size, total_size):
+            if total_size > 0:
+                downloaded = block_count * block_size
+                percent = min(100, (downloaded / total_size) * 100)
+                gb_downloaded = downloaded / (1024 * 1024 * 1024)
+                gb_total = total_size / (1024 * 1024 * 1024)
+                
+                bar_width = 50
+                filled = int(bar_width * downloaded / total_size)
+                bar = '█' * filled + '░' * (bar_width - filled)
+                
+                print(f"\r{Colors.OKCYAN}[{bar}] {percent:5.1f}% | {gb_downloaded:4.2f}/{gb_total:.2f} GB{Colors.ENDC}", 
+                      end='', flush=True)
+        
+        urllib.request.urlretrieve(url, str(zip_file), progress_callback)
+        print()  # New line after progress
+        
+        print_info("Extracting FMA archive (this may take several minutes)...")
+        with zipfile.ZipFile(zip_file, 'r') as zip_ref:
+            zip_ref.extractall(output_path)
+        
+        zip_file.unlink()
+        return True
+        
+    except Exception as e:
+        print_error(f"Failed to download FMA: {e}")
+        print_info("You can download manually from: https://github.com/mdeff/fma")
+        return False
+
 def clone_openwakeword(base_dir: Path) -> bool:
     """Clone OpenWakeWord repository if not present and install it"""
     openwakeword_dir = base_dir / "openwakeword"
@@ -600,18 +869,25 @@ def create_training_config(
         config['feature_data_files'] = {
             'ACAV100M_sample': str(acav100m_features)
         }
-        print_success(f"ACAV100M features found: {acav100m_features}")
+        size_mb = acav100m_features.stat().st_size / (1024 * 1024)
+        print_success(f"ACAV100M features found: {acav100m_features} ({size_mb:.1f} MB)")
     else:
         print_warning("ACAV100M features not found - adversarial sampling disabled")
-        print_info("Download from: https://github.com/dscripka/openWakeWord")
+        print_info("These features are automatically downloaded during setup")
+        print_info("If download failed, you can retry the script or download manually from:")
+        print_info("https://huggingface.co/datasets/davidscripka/openwakeword_features/resolve/main/openwakeword_features_ACAV100M_2000_hrs_16bit.npy")
         # Remove ACAV100M from batch settings if not available
         del config['batch_n_per_class']['ACAV100M_sample']
     
     if validation_features.exists():
         config['false_positive_validation_data_path'] = str(validation_features)
-        print_success(f"Validation features found: {validation_features}")
+        size_mb = validation_features.stat().st_size / (1024 * 1024)
+        print_success(f"Validation features found: {validation_features} ({size_mb:.1f} MB)")
     else:
         print_warning("Validation features not found - using training data for validation")
+        print_info("These features are automatically downloaded during setup")
+        print_info("If download failed, you can retry the script or download manually from:")
+        print_info("https://huggingface.co/datasets/davidscripka/openwakeword_features/resolve/main/validation_set_features.npy")
     
     # Save configuration
     config_file = base_dir / f"training_config_{model_name}.yaml"
@@ -697,6 +973,107 @@ def generate_samples(wake_word: str, pronunciations: list, n_samples: int, base_
     return True
 
 
+def _get_tts_models_config():
+    """Get the unified TTS model configuration for both positive and negative samples"""
+    return [
+        {"model": "tts_models/en/ljspeech/tacotron2-DDC", "gender": "female"},
+        {"model": "tts_models/en/ljspeech/tacotron2-DCA", "gender": "female"},
+        {"model": "tts_models/en/ljspeech/glow-tts", "gender": "female"},
+        {"model": "tts_models/en/ljspeech/speedy-speech", "gender": "female"},
+        {"model": "tts_models/en/ljspeech/fast_pitch", "gender": "female"},
+        {"model": "tts_models/en/ljspeech/overflow", "gender": "female"},
+        {"model": "tts_models/en/ljspeech/neural_hmm", "gender": "female"},
+        {"model": "tts_models/en/ljspeech/vits", "gender": "female"},
+        {"model": "tts_models/en/vctk/vits", "speaker": "p225", "gender": "female"},
+        {"model": "tts_models/en/vctk/vits", "speaker": "p226", "gender": "male"},
+        {"model": "tts_models/en/jenny/jenny", "gender": "female"},
+        {"model": "tts_models/en/sam/tacotron-DDC", "gender": "male"},
+        {"model": "tts_models/en/ek1/tacotron2", "gender": "male"},
+        {"model": "tts_models/multilingual/multi-dataset/your_tts", "speaker": "male-en-2", "language": "en"},
+        {"model": "tts_models/multilingual/multi-dataset/your_tts", "speaker": "female-en-5", "language": "en"},
+    ]
+
+
+def _setup_tts_environment(base_dir: Path):
+    """Setup TTS environment and return device"""
+    import os
+    os.environ['TTS_HOME'] = str(base_dir)
+    
+    try:
+        import torch
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    except ImportError:
+        device = "cpu"
+    
+    # Suppress verbose TTS logging
+    import logging
+    logging.getLogger('TTS').setLevel(logging.CRITICAL)
+    logging.getLogger('TTS.tts.utils.synthesis').setLevel(logging.CRITICAL)
+    logging.getLogger('TTS.tts.models').setLevel(logging.CRITICAL)
+    logging.getLogger('TTS.utils').setLevel(logging.CRITICAL)
+    
+    return device
+
+
+class _SuppressOutput:
+    """Context manager to suppress stdout/stderr during TTS generation"""
+    def __enter__(self):
+        import sys as _sys
+        import io
+        self._original_stdout = _sys.stdout
+        self._original_stderr = _sys.stderr
+        _sys.stdout = io.StringIO()
+        _sys.stderr = io.StringIO()
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        import sys as _sys
+        _sys.stdout = self._original_stdout
+        _sys.stderr = self._original_stderr
+
+
+def _process_audio_sample(audio_file: Path, target_sr: int = 16000, max_duration: float = 4.0) -> bool:
+    """
+    Process audio sample: validate, trim silence, and resample to 16kHz
+    
+    Returns:
+        True if processing successful, False if sample should be discarded
+    """
+    try:
+        from scipy.io import wavfile
+        import librosa
+        import numpy as np
+        
+        sr, audio = wavfile.read(str(audio_file))
+        
+        # Skip if too long
+        if len(audio) / sr > max_duration:
+            audio_file.unlink()
+            return False
+        
+        # Trim silence
+        audio_float = audio.astype(np.float32)
+        audio_trimmed, _ = librosa.effects.trim(audio_float, top_db=30)
+        
+        # Resample to target sample rate if needed
+        if sr != target_sr:
+            from scipy import signal
+            num_samples = int(len(audio_trimmed) * target_sr / sr)
+            audio_resampled = signal.resample(audio_trimmed, num_samples)
+            audio = audio_resampled.astype(np.int16)
+        else:
+            audio = audio_trimmed.astype(np.int16)
+        
+        # Save processed audio
+        wavfile.write(str(audio_file), target_sr, audio)
+        return True
+        
+    except Exception:
+        if audio_file.exists():
+            audio_file.unlink()
+        return False
+
+
 def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: int, clips_dir: Path, base_dir: Path) -> bool:
     """Generate positive samples (wake word pronunciations) using TTS"""
     print_header("Generating Positive Samples")
@@ -705,63 +1082,21 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
     
     try:
         from TTS.api import TTS
-        import librosa
-        from scipy.io import wavfile
         import numpy as np
         
-        # Set TTS cache directory
-        import os
-        os.environ['TTS_HOME'] = str(base_dir)
+        # Setup environment
+        device = _setup_tts_environment(base_dir)
+        tts_models = _get_tts_models_config()
         
-        # TTS models to use for variety
-        tts_models = [
-            {"model": "tts_models/en/ljspeech/tacotron2-DDC", "gender": "female"},
-            {"model": "tts_models/en/ljspeech/glow-tts", "gender": "female"},
-            {"model": "tts_models/en/ljspeech/fast_pitch", "gender": "female"},
-            {"model": "tts_models/en/jenny/jenny", "gender": "female"},
-            {"model": "tts_models/multilingual/multi-dataset/your_tts", "speaker": "male-en-2", "language": "en"},
-            {"model": "tts_models/multilingual/multi-dataset/your_tts", "speaker": "female-en-5", "language": "en"},
-        ]
+        # Calculate samples per model
+        samples_per_model = (n_samples // len(tts_models)) + 1
+        samples_per_combo = max(1, samples_per_model // len(pronunciations))
         
-        # Use user-provided pronunciations
-        variations = pronunciations
-        
-        # Check GPU availability
-        try:
-            import torch
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-        except ImportError:
-            device = "cpu"
-        
-        samples_per_combo = n_samples // (len(tts_models) * len(variations))
-        
-        print_info(f"Using {len(tts_models)} TTS models with {len(variations)} pronunciations")
-        print_info(f"Generating ~{samples_per_combo} samples per combination")
+        print_info(f"Using {len(tts_models)} TTS models with {len(pronunciations)} pronunciations")
+        print_info(f"Target: {n_samples} samples total")
+        print_info(f"Generating ~{samples_per_combo} samples per model/variation combination")
         print_info(f"Device: {device.upper()}")
         print_info("Starting sample generation...\n")
-        
-        # Suppress verbose TTS logging completely
-        import logging
-        logging.getLogger('TTS').setLevel(logging.CRITICAL)
-        logging.getLogger('TTS.tts.utils.synthesis').setLevel(logging.CRITICAL)
-        logging.getLogger('TTS.tts.models').setLevel(logging.CRITICAL)
-        logging.getLogger('TTS.utils').setLevel(logging.CRITICAL)
-        
-        # Suppress stdout from TTS
-        import sys as _sys
-        import io
-        
-        class SuppressOutput:
-            def __enter__(self):
-                self._original_stdout = _sys.stdout
-                self._original_stderr = _sys.stderr
-                _sys.stdout = io.StringIO()
-                _sys.stderr = io.StringIO()
-                return self
-            
-            def __exit__(self, exc_type, exc_val, exc_tb):
-                _sys.stdout = self._original_stdout
-                _sys.stderr = self._original_stderr
         
         valid_count = 0
         failed_count = 0
@@ -772,13 +1107,14 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
             
             print_info(f"\nLoading model: {model_short}...")
             try:
-                # Load model (don't suppress to allow auto-download messages)
+                # Load model (allow auto-download)
+                import logging
                 logging.getLogger('TTS').setLevel(logging.WARNING)
                 tts = TTS(model_name=model_path).to(device)
                 logging.getLogger('TTS').setLevel(logging.CRITICAL)
                 print_success(f"Model {model_short} loaded successfully")
                 
-                for variation in variations:
+                for variation in pronunciations:
                     # Create subfolder for this model/variation
                     gender = model_config.get("gender", "voice")
                     speaker = model_config.get("speaker", "")
@@ -787,11 +1123,12 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                     subfolder.mkdir(parents=True, exist_ok=True)
                     
                     # Generate samples for this combination
-                    for i in range(samples_per_combo):
+                    combo_count = 0
+                    while valid_count < n_samples and combo_count < samples_per_combo + 10:
                         output_file = subfolder / f"{model_name}_{valid_count}.wav"
                         
                         try:
-                            # Generate with slight speed variation
+                            # Generate with speed variation
                             speed = 1.0 + np.random.uniform(-0.1, 0.1)
                             
                             kwargs = {
@@ -806,61 +1143,39 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                                 kwargs['language'] = model_config['language']
                             
                             # Generate sample with suppressed output
-                            with SuppressOutput():
+                            with _SuppressOutput():
                                 tts.tts_to_file(**kwargs)
                             
-                            # Validate and process
-                            sr, audio = wavfile.read(str(output_file))
-                            duration = len(audio) / sr
-                            
-                            # Skip if too long (>4 seconds)
-                            if duration > 4.0:
-                                output_file.unlink()
+                            # Process and validate audio
+                            if _process_audio_sample(output_file):
+                                valid_count += 1
+                                combo_count += 1
+                            else:
                                 failed_count += 1
+                                combo_count += 1
                                 continue
                             
-                            # Trim silence
-                            audio_float = audio.astype(np.float32)
-                            audio_trimmed, _ = librosa.effects.trim(audio_float, top_db=30)
-                            
-                            # Resample to 16kHz if needed
-                            if sr != 16000:
-                                from scipy import signal
-                                num_samples = int(len(audio_trimmed) * 16000 / sr)
-                                audio_resampled = signal.resample(audio_trimmed, num_samples)
-                                audio = audio_resampled.astype(np.int16)
-                            else:
-                                audio = audio_trimmed.astype(np.int16)
-                            
-                            # Save final version
-                            wavfile.write(str(output_file), 16000, audio)
-                            valid_count += 1
-                            
-                            # Show progress bar with statistics
+                            # Show progress bar
                             progress_pct = (valid_count / n_samples) * 100
                             total_attempts = valid_count + failed_count
                             fail_pct = (failed_count / total_attempts * 100) if total_attempts > 0 else 0
                             
-                            # Create progress bar (50 chars wide)
                             bar_width = 50
                             filled = int(bar_width * valid_count / n_samples)
                             bar = '█' * filled + '░' * (bar_width - filled)
                             
-                            # Format variation name (truncate if too long)
                             var_display = variation if len(variation) <= 20 else variation[:17] + '...'
                             
                             print(f"\r{Colors.OKCYAN}[{bar}] {progress_pct:5.1f}% | {valid_count}/{n_samples} valid | "
                                   f"Failed: {fail_pct:4.1f}% | Current: '{var_display}' ({model_short}){Colors.ENDC}", 
                                   end='', flush=True)
                                 
-                        except Exception as e:
+                        except Exception:
                             failed_count += 1
+                            combo_count += 1
                             if output_file.exists():
                                 output_file.unlink()
                             continue
-                        
-                        if valid_count >= n_samples:
-                            break
                     
                     if valid_count >= n_samples:
                         break
@@ -931,12 +1246,18 @@ def _generate_negative_samples(wake_word: str, n_samples: int, base_dir: Path) -
             torch.load = patched_torch_load
             
             # Generate adversarial texts with patched torch.load
+            print_info("Generating adversarial text phrases...")
+            print_info("This may take 1-2 minutes on first run (downloading phonemizer models)")
+            print_info("Please wait...")
+            
             adversarial_texts = generate_adversarial_texts(
                 input_text=wake_word,
                 N=n_samples,
                 include_partial_phrase=1.0,  # Include partial phrases (e.g., "ho" from "homie")
                 include_input_words=0.2      # Sometimes include actual wake word parts
             )
+            
+            print_success("Adversarial text generation complete!")
         finally:
             # Restore original torch.load
             torch.load = original_torch_load
@@ -954,13 +1275,20 @@ def _generate_negative_samples(wake_word: str, n_samples: int, base_dir: Path) -
         os.environ['TTS_HOME'] = str(base_dir)
         
         # Use the same TTS models as positive sample generation for consistency
+        # All available English models with GPU support
         tts_models = [
             "tts_models/en/ljspeech/tacotron2-DDC",
+            "tts_models/en/ljspeech/tacotron2-DCA",
             "tts_models/en/ljspeech/glow-tts",
+            "tts_models/en/ljspeech/speedy-speech",
             "tts_models/en/ljspeech/fast_pitch",
-            "tts_models/en/ljspeech/vits",
+            "tts_models/en/ljspeech/overflow",
             "tts_models/en/ljspeech/neural_hmm",
+            "tts_models/en/ljspeech/vits",
+            "tts_models/en/vctk/vits",  # Multiple speakers available
             "tts_models/en/jenny/jenny",
+            "tts_models/en/sam/tacotron-DDC",
+            "tts_models/en/ek1/tacotron2",
             "tts_models/multilingual/multi-dataset/your_tts",  # Both female and male speakers
         ]
         
@@ -993,19 +1321,24 @@ def _generate_negative_samples(wake_word: str, n_samples: int, base_dir: Path) -
         valid_count = 0
         failed_count = 0
         
-        # Calculate samples per model configuration (including your_tts male/female as separate)
-        # your_tts will be used with 2 speakers, so count it as 2
-        total_model_configs = len(tts_models) + 1  # +1 because your_tts uses 2 speakers
+        # Calculate samples per model configuration (including multi-speaker models)
+        # your_tts: 2 speakers, vctk: 2 speakers (p225, p226)
+        total_model_configs = len(tts_models) + 3  # +3 for extra speaker configs
         samples_per_model = n_samples // total_model_configs
         
         for model_name in tts_models:
             model_short = model_name.split('/')[-1]
             
-            # Handle your_tts with both female and male speakers (like positive generation)
+            # Handle multi-speaker models
             if 'your_tts' in model_name:
                 speakers = [
                     ("female-en-5", "female"),
                     ("male-en-2", "male")
+                ]
+            elif 'vctk' in model_name:
+                speakers = [
+                    ("p225", "female"),  # British female
+                    ("p226", "male")     # British male
                 ]
             else:
                 speakers = [(None, None)]  # Single-speaker models
@@ -1048,6 +1381,7 @@ def _generate_negative_samples(wake_word: str, n_samples: int, base_dir: Path) -
                             import time
                             time.sleep(0.5)
                         
+                        print_info(f"Loading {model_short}{speaker_suffix} (may download if not cached)...")
                         tts = TTS(model_name=model_name).to(device)
                         logging.getLogger('TTS').setLevel(logging.CRITICAL)
                         print_success(f"Model {model_short}{speaker_suffix} loaded successfully")
@@ -1385,6 +1719,16 @@ def main():
     if not clone_openwakeword(base_dir):
         print_error("OpenWakeWord repository required")
         sys.exit(1)
+    
+    # Step 2.6: Download training features (ACAV100M and validation)
+    if not download_training_features(base_dir):
+        print_error("Training feature download failed")
+        if not get_yes_no("Continue without all features? (training quality may be reduced)", default=False):
+            sys.exit(1)
+        print_warning("Continuing without all training features - expect reduced model quality")
+    
+    # Step 2.7: Check background datasets (optional but recommended)
+    background_status = check_background_datasets(base_dir)
     
     print_success("\nAll environment checks passed!")
     
