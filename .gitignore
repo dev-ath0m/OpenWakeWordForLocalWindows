@@ -1,3 +1,5 @@
 /wakeword_env
 /clips
 /tts
+training_config_homie.yaml
+openwakeword/
