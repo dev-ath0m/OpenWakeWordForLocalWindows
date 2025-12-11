@@ -490,7 +490,10 @@ def create_training_config(
             'background_noise_dir': str(base_dir / "audioset_16k"),
             'music_dir': str(base_dir / "fma"),
             'room_impulse_dir': str(base_dir / "mit_rirs"),
-        }
+        },
+        
+        # Disable Piper generator (not compatible with Windows)
+        'use_piper': False
     }
     
     # Add ACAV100M features if available
@@ -570,6 +573,19 @@ def generate_samples(wake_word: str, pronunciations: list, n_samples: int, base_
     # Built-in sample generation with multiple TTS models
     print_info("Using built-in multi-model TTS generator")
     print_info("Models will be downloaded and cached in 'tts/' folder automatically")
+    
+    # Generate both positive and negative samples
+    positive_success = _generate_positive_samples(wake_word, pronunciations, n_samples, clips_dir, base_dir)
+    negative_success = _generate_negative_samples(wake_word, n_samples, base_dir)
+    
+    return positive_success
+
+
+def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: int, clips_dir: Path, base_dir: Path) -> bool:
+    """Generate positive samples (wake word pronunciations) using TTS"""
+    print_header("Generating Positive Samples")
+    
+    model_name = wake_word.lower().replace(' ', '_')
     
     try:
         from TTS.api import TTS
@@ -743,7 +759,7 @@ def generate_samples(wake_word: str, pronunciations: list, n_samples: int, base_
             if valid_count >= n_samples:
                 break
         
-        print_success(f"\nGenerated {valid_count} valid samples")
+        print_success(f"\nGenerated {valid_count} valid positive samples")
         total_attempts = valid_count + failed_count
         if failed_count > 0:
             fail_pct = (failed_count / total_attempts * 100)
@@ -752,8 +768,165 @@ def generate_samples(wake_word: str, pronunciations: list, n_samples: int, base_
         return valid_count > 0
         
     except Exception as e:
-        print_error(f"Sample generation failed: {e}")
+        print_error(f"Positive sample generation failed: {e}")
         return False
+
+
+def _generate_negative_samples(wake_word: str, n_samples: int, base_dir: Path) -> bool:
+    """Generate negative samples (phonetically similar non-wake-words) using TTS as Piper replacement"""
+    print_header("Generating Negative Samples")
+    
+    model_name = wake_word.lower().replace(' ', '_')
+    output_dir = base_dir / "trained_models" / model_name
+    negative_train_dir = output_dir / "negative_train"
+    negative_train_dir.mkdir(parents=True, exist_ok=True)
+    
+    print_info("Generating phonetically similar adversarial phrases")
+    print_info("These teach the model what NOT to trigger on")
+    
+    try:
+        # Import OpenWakeWord's adversarial text generator
+        import sys
+        openwakeword_path = base_dir / "openwakeword"
+        if str(openwakeword_path) not in sys.path:
+            sys.path.insert(0, str(openwakeword_path))
+        
+        from openwakeword.data import generate_adversarial_texts
+        
+        # Generate adversarial texts based on the wake word
+        print_info(f"Analyzing phonemes for '{wake_word}'...")
+        adversarial_texts = generate_adversarial_texts(
+            input_text=wake_word,
+            N=n_samples,
+            include_partial_phrase=1.0,  # Include partial phrases (e.g., "ho" from "homie")
+            include_input_words=0.2      # Sometimes include actual wake word parts
+        )
+        
+        print_success(f"Generated {len(adversarial_texts)} phonetically similar phrases")
+        print_info(f"Examples: {', '.join(adversarial_texts[:5])}")
+        
+        # Now generate audio samples for these adversarial texts using TTS
+        from TTS.api import TTS
+        import librosa
+        from scipy.io import wavfile
+        import numpy as np
+        import os
+        
+        os.environ['TTS_HOME'] = str(base_dir)
+        
+        # Use faster models for negative samples (same as Piper approach)
+        tts_models = [
+            "tts_models/en/ljspeech/fast_pitch",
+            "tts_models/en/ljspeech/glow-tts",
+        ]
+        
+        # Check GPU
+        try:
+            import torch
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        except ImportError:
+            device = "cpu"
+        
+        # Suppress logging
+        import logging
+        import sys as _sys
+        import io
+        
+        logging.getLogger('TTS').setLevel(logging.CRITICAL)
+        
+        class SuppressOutput:
+            def __enter__(self):
+                self._original_stdout = _sys.stdout
+                self._original_stderr = _sys.stderr
+                _sys.stdout = io.StringIO()
+                _sys.stderr = io.StringIO()
+                return self
+            
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                _sys.stdout = self._original_stdout
+                _sys.stderr = self._original_stderr
+        
+        valid_count = 0
+        failed_count = 0
+        samples_per_model = n_samples // len(tts_models)
+        
+        for model_name in tts_models:
+            model_short = model_name.split('/')[-1]
+            print_info(f"\nLoading model: {model_short}...")
+            
+            try:
+                with SuppressOutput():
+                    tts = TTS(model_name=model_name).to(device)
+                
+                # Cycle through adversarial texts
+                for i, text in enumerate(adversarial_texts):
+                    if valid_count >= samples_per_model * (tts_models.index(model_name) + 1):
+                        break
+                    
+                    output_file = negative_train_dir / f"neg_{valid_count}.wav"
+                    
+                    try:
+                        # Generate with speed variation
+                        speed = 1.0 + np.random.uniform(-0.15, 0.15)
+                        
+                        with SuppressOutput():
+                            tts.tts_to_file(text=text, file_path=str(output_file), speed=speed)
+                        
+                        # Process audio
+                        sr, audio = wavfile.read(str(output_file))
+                        
+                        # Skip if too long
+                        if len(audio) / sr > 4.0:
+                            output_file.unlink()
+                            failed_count += 1
+                            continue
+                        
+                        # Trim and resample
+                        audio_float = audio.astype(np.float32)
+                        audio_trimmed, _ = librosa.effects.trim(audio_float, top_db=30)
+                        
+                        if sr != 16000:
+                            from scipy import signal
+                            num_samples_resampled = int(len(audio_trimmed) * 16000 / sr)
+                            audio_resampled = signal.resample(audio_trimmed, num_samples_resampled)
+                            audio = audio_resampled.astype(np.int16)
+                        else:
+                            audio = audio_trimmed.astype(np.int16)
+                        
+                        wavfile.write(str(output_file), 16000, audio)
+                        valid_count += 1
+                        
+                        # Show progress
+                        if valid_count % 50 == 0 or valid_count == n_samples:
+                            progress_pct = (valid_count / n_samples) * 100
+                            fail_pct = (failed_count / (valid_count + failed_count) * 100) if (valid_count + failed_count) > 0 else 0
+                            print_info(f"Progress: {valid_count}/{n_samples} ({progress_pct:.1f}%) | Failed: {fail_pct:.1f}%")
+                        
+                    except Exception as e:
+                        failed_count += 1
+                        if output_file.exists():
+                            output_file.unlink()
+                        continue
+                
+                if valid_count >= n_samples:
+                    break
+                    
+            except Exception as e:
+                print_warning(f"Model {model_short} failed: {e}")
+                continue
+        
+        print_success(f"\nGenerated {valid_count} negative samples in {negative_train_dir}")
+        if failed_count > 0:
+            print_info(f"Failed: {failed_count} samples ({failed_count/(valid_count+failed_count)*100:.1f}%)")
+        return valid_count > 0
+        
+    except Exception as e:
+        print_error(f"Negative sample generation failed: {e}")
+        print_warning("Training will use ACAV100M features only for negative samples")
+        import traceback
+        traceback.print_exc()
+        return False
+
 
 def augment_samples(config_file: Path, base_dir: Path) -> bool:
     """Augment samples with background noise and room impulse responses"""
