@@ -287,7 +287,7 @@ Write-Host "These improve model quality but are optional (training works without
 
 $datasetsToDownload = @()
 
-# Check MIT RIRs (Room Impulse Responses) - 271 files, ~50MB
+# Check MIT RIRs (Room Impulse Responses) - 271 files, ~50MB (direct from MIT)
 $mitRirsPath = "mit_rirs"
 if (-not (Test-Path $mitRirsPath)) {
     New-Item -ItemType Directory -Path $mitRirsPath | Out-Null
@@ -298,6 +298,19 @@ if ($mitRirsCount -lt 250) {
     $datasetsToDownload += "mit_rirs"
 } else {
     Write-Host "  [OK] MIT RIRs - $mitRirsCount files" -ForegroundColor Green
+}
+
+# Check MIT Environmental (HuggingFace dataset - matches original Colab) - ~300MB
+$mitEnvPath = "MIT_environmental_impulse_responses"
+if (-not (Test-Path $mitEnvPath)) {
+    New-Item -ItemType Directory -Path $mitEnvPath | Out-Null
+}
+$mitEnvCount = (Get-ChildItem -Path $mitEnvPath -Filter "*.wav" -ErrorAction SilentlyContinue | Measure-Object).Count
+if ($mitEnvCount -lt 250) {
+    Write-Host "  [!] MIT Environmental - missing or incomplete ($mitEnvCount files)" -ForegroundColor Yellow
+    $datasetsToDownload += "mit_environmental"
+} else {
+    Write-Host "  [OK] MIT Environmental - $mitEnvCount files" -ForegroundColor Green
 }
 
 # Check FMA (Free Music Archive) - recommend fma_small (8000 tracks, 7.2GB)
@@ -353,8 +366,16 @@ if ($datasetsToDownload.Count -gt 0 -or $audiosetCount -lt 100) {
                 Write-Host "    You can download manually from: https://mcdermottlab.mit.edu/Reverb/IR_Survey.html" -ForegroundColor Yellow
             }
         }
-        
-        # Download FMA small (larger download, ~7.2GB)
+                # Download MIT Environmental (from HuggingFace - matches original Colab)
+        if ($datasetsToDownload -contains "mit_environmental") {
+            Write-Host "`n  MIT Environmental Impulse Responses (~300MB from HuggingFace)..." -ForegroundColor Cyan
+            Write-Host "    This dataset matches the original Colab training notebook" -ForegroundColor Gray
+            Write-Host "    Requires Python 'datasets' package - will be downloaded during training" -ForegroundColor Gray
+            Write-Host "    You can also download it manually by running:" -ForegroundColor Gray
+            Write-Host "      python -c `"import datasets; ds=datasets.load_dataset('davidscripka/MIT_environmental_impulse_responses', split='train'); [...]`"" -ForegroundColor DarkGray
+            Write-Host "    [INFO] Will be offered during training script" -ForegroundColor Yellow
+        }
+                # Download FMA small (larger download, ~7.2GB)
         if ($datasetsToDownload -contains "fma") {
             Write-Host "`n  FMA (Free Music Archive) download options:" -ForegroundColor Cyan
             Write-Host "    1. fma_small (7.2 GB, 8,000 tracks) - Recommended" -ForegroundColor Gray
