@@ -476,6 +476,7 @@ def download_fma(output_path: Path, size: str) -> bool:
     try:
         import urllib.request
         import zipfile
+        from tqdm import tqdm
         
         if size == '1':
             url = "https://os.unil.cloud.switch.ch/fma/fma_small.zip"
@@ -509,7 +510,12 @@ def download_fma(output_path: Path, size: str) -> bool:
         
         print_info("Extracting FMA archive (this may take several minutes)...")
         with zipfile.ZipFile(zip_file, 'r') as zip_ref:
-            zip_ref.extractall(output_path)
+            members = zip_ref.namelist()
+            with tqdm(total=len(members), desc="Extracting", unit="files", 
+                     bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} files [{elapsed}<{remaining}]') as pbar:
+                for member in members:
+                    zip_ref.extract(member, output_path)
+                    pbar.update(1)
         
         zip_file.unlink()
         return True
