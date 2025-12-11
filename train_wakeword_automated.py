@@ -152,31 +152,44 @@ def check_dependencies() -> dict:
     return status
 
 def clone_openwakeword(base_dir: Path) -> bool:
-    """Clone OpenWakeWord repository if not present"""
+    """Clone OpenWakeWord repository if not present and install it"""
     openwakeword_dir = base_dir / "openwakeword"
     
+    # Check if already cloned
     if openwakeword_dir.exists():
         print_success(f"OpenWakeWord already present: {openwakeword_dir}")
-        return True
+    else:
+        print_header("Cloning OpenWakeWord")
+        print_info("Downloading OpenWakeWord from GitHub...")
+        
+        try:
+            subprocess.run(
+                ['git', 'clone', 'https://github.com/dscripka/openWakeWord.git', 'openwakeword'],
+                cwd=str(base_dir),
+                check=True
+            )
+            print_success("OpenWakeWord cloned successfully")
+        except subprocess.CalledProcessError as e:
+            print_error(f"Git clone failed: {e}")
+            print_info("Make sure git is installed: https://git-scm.com/download/win")
+            return False
+        except FileNotFoundError:
+            print_error("Git not found")
+            print_info("Install git from: https://git-scm.com/download/win")
+            return False
     
-    print_header("Cloning OpenWakeWord")
-    print_info("Downloading OpenWakeWord from GitHub...")
-    
+    # Install OpenWakeWord as editable package
+    print_info("Installing OpenWakeWord package...")
     try:
         subprocess.run(
-            ['git', 'clone', 'https://github.com/dscripka/openWakeWord.git', 'openwakeword'],
-            cwd=str(base_dir),
-            check=True
+            [sys.executable, '-m', 'pip', 'install', '-e', str(openwakeword_dir)],
+            check=True,
+            capture_output=True
         )
-        print_success("OpenWakeWord cloned successfully")
+        print_success("OpenWakeWord package installed")
         return True
     except subprocess.CalledProcessError as e:
-        print_error(f"Git clone failed: {e}")
-        print_info("Make sure git is installed: https://git-scm.com/download/win")
-        return False
-    except FileNotFoundError:
-        print_error("Git not found")
-        print_info("Install git from: https://git-scm.com/download/win")
+        print_error(f"OpenWakeWord installation failed: {e}")
         return False
 
 def install_dependencies() -> bool:
