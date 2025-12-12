@@ -1244,7 +1244,9 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
             model_path = model_config["model"]
             model_short = model_path.split('/')[-1]
             
-            print_info(f"\nLoading model: {model_short}...")
+            # Clear any previous progress line
+            print("\r" + " " * 120 + "\r", end='', flush=True)
+            print_info(f"Loading model: {model_short}...")
             try:
                 # Load model (allow auto-download)
                 import logging
