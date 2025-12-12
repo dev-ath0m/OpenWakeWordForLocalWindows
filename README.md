@@ -130,12 +130,76 @@ Full list in `requirements.txt`
 
 ### Windows-Specific Fixes Applied
 
-1. **Piper Replacement**: Uses GPU-accelerated TTS models (fast_pitch, glow-tts) instead of Piper for negative sample generation
-2. **Phoneme-Based Adversarial Samples**: Leverages OpenWakeWord's `generate_adversarial_texts()` to create phonetically similar negative samples
-3. **File Trimming Skip**: Disabled on Windows due to file locking issues
-4. **Multiprocessing Disabled**: DataLoader uses `num_workers=0` to avoid pickling errors
-5. **Unicode Handling**: ASCII filtering for console output compatibility
-6. **Progress Visualization**: Real-time progress bars with sample statistics during generation
+The setup script automatically patches OpenWakeWord's code for Windows compatibility. These patches are applied during `SETUP_COMPLETE.ps1` execution:
+
+#### 1. **Piper Dependency Removal** (`train.py`)
+- **Issue**: Original code requires Piper TTS which has complex dependencies
+- **Fix**: Patch `train.py` to make Piper import optional
+- **Impact**: Allows training to work without Piper installation
+
+#### 2. **Memory-Mapped File Cleanup** (`utils.py`)
+- **Issue**: Windows file locking prevents deletion of memory-mapped numpy files
+- **Fix**: Add explicit cleanup before `trim_mmap()`:
+  ```python
+  # Close memory-mapped file before trimming (Windows requires this)
+  del fp
+  import gc
+  gc.collect()
+  ```
+- **Location**: `openwakeword/openwakeword/utils.py` ~line 600
+- **Impact**: Prevents `PermissionError: [WinError 32]` during feature augmentation
+
+#### 3. **Memory-Mapped File Deletion** (`data.py`)
+- **Issue**: Windows file locking prevents `os.remove()` on open memory-mapped files
+- **Fix**: Add explicit cleanup before `os.remove()`:
+  ```python
+  # Close memory-mapped files before deleting (Windows requires this)
+  del mmap_file1
+  del mmap_file2
+  import gc
+  gc.collect()
+  ```
+- **Location**: `openwakeword/openwakeword/data.py` ~line 889
+- **Impact**: Prevents file permission errors during data trimming
+
+#### 4. **Multiprocessing Pickle Errors** (`train.py`)
+- **Issue**: Lambda functions can't be pickled for Windows multiprocessing
+- **Fix**: Replace lambda functions with named functions:
+  ```python
+  # OLD: label_transforms[key] = lambda x: [1 for i in x]
+  # NEW:
+  def positive_label_transform(x):
+      return [1 for i in x]
+  
+  def negative_label_transform(x):
+      return [0 for i in x]
+  ```
+- **Location**: `openwakeword/openwakeword/train.py` ~line 854-856
+- **Impact**: Prevents `_pickle.PicklingError` during training
+
+#### 5. **DataLoader Workers on Windows** (`train.py`)
+- **Issue**: Windows multiprocessing doesn't work well with PyTorch DataLoader
+- **Fix**: Platform-specific num_workers setting:
+  ```python
+  # On Windows, use num_workers=0 to avoid multiprocessing pickle errors
+  import platform
+  if platform.system() == "Windows":
+      n_workers = 0
+      prefetch = None
+  else:
+      n_workers = n_cpus//2
+      prefetch = 16
+  ```
+- **Location**: `openwakeword/openwakeword/train.py` ~line 884
+- **Impact**: Prevents DataLoader multiprocessing errors on Windows
+
+### How Patches Are Applied
+
+All patches are **automatically applied** by:
+1. `SETUP_COMPLETE.ps1` during initial setup
+2. `clone_openwakeword()` function in `train_wakeword_automated.py`
+
+The patching functions check if changes are needed and apply them safely without breaking already-patched files.
 
 ## Project Structure
 
