@@ -3,7 +3,8 @@
 # Tested on Windows with CUDA 12.4
 
 # ===== Core TTS and Speech Processing =====
-TTS>=0.22.0
+# Note: TTS 0.22+ has GPU inference issues - using 0.21.3 for reliable GPU support
+TTS==0.21.3
 piper-tts
 webrtcvad
 pronouncing==0.2.0
