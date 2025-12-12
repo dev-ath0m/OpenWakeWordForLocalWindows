@@ -1229,6 +1229,26 @@ def _process_audio_sample(audio_file: Path, target_sr: int = 16000, max_duration
         return False
 
 
+def _setup_tts_environment(base_dir: Path):
+    """Setup TTS environment with PyTorch 2.6 compatibility fixes"""
+    import os
+    os.environ['TTS_HOME'] = str(base_dir)
+    
+    # Fix PyTorch 2.6 weights_only issue for TTS models
+    import torch
+    from TTS.utils.radam import RAdam
+    from collections import defaultdict
+    torch.serialization.add_safe_globals([RAdam, defaultdict])
+    
+    # Suppress verbose TTS logging
+    import logging
+    logging.getLogger('TTS').setLevel(logging.CRITICAL)
+    
+    # Check GPU availability
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    return device
+
+
 def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: int, clips_dir: Path, base_dir: Path) -> bool:
     """Generate positive samples (wake word pronunciations) using TTS"""
     print_header("Generating Positive Samples")
@@ -1271,16 +1291,8 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                 import sys
                 import os
                 
-                logging.getLogger('TTS').setLevel(logging.CRITICAL)
-                
                 # Setup TTS log file for redirecting verbose output
                 tts_log_path = base_dir / "tts_output.log"
-                
-                # Fix PyTorch 2.6 weights_only issue for TTS models
-                import torch
-                from TTS.utils.radam import RAdam
-                from collections import defaultdict
-                torch.serialization.add_safe_globals([RAdam, defaultdict])
                 
                 # Spinner for model loading
                 loading_done = threading.Event()
@@ -1532,53 +1544,14 @@ def _generate_negative_samples(wake_word: str, n_samples: int, base_dir: Path) -
         import librosa
         from scipy.io import wavfile
         import numpy as np
-        import os
         
-        os.environ['TTS_HOME'] = str(base_dir)
+        # Setup TTS environment
+        device = _setup_tts_environment(base_dir)
         
-        # Use the same TTS models as positive sample generation for consistency
-        # All available English models with GPU support
-        tts_models = [
-            "tts_models/en/ljspeech/tacotron2-DDC",
-            "tts_models/en/ljspeech/tacotron2-DCA",
-            "tts_models/en/ljspeech/glow-tts",
-            "tts_models/en/ljspeech/speedy-speech",
-            "tts_models/en/ljspeech/fast_pitch",
-            "tts_models/en/ljspeech/overflow",
-            "tts_models/en/ljspeech/neural_hmm",
-            "tts_models/en/ljspeech/vits",
-            "tts_models/en/vctk/vits",  # Multiple speakers available
-            "tts_models/en/jenny/jenny",
-            "tts_models/en/sam/tacotron-DDC",
-            "tts_models/en/ek1/tacotron2",
-            "tts_models/multilingual/multi-dataset/your_tts",  # Both female and male speakers
-        ]
-        
-        # Check GPU
-        try:
-            import torch
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-        except ImportError:
-            device = "cpu"
-        
-        # Suppress logging
-        import logging
-        import sys as _sys
-        import io
-        
-        logging.getLogger('TTS').setLevel(logging.CRITICAL)
-        
-        class SuppressOutput:
-            def __enter__(self):
-                self._original_stdout = _sys.stdout
-                self._original_stderr = _sys.stderr
-                _sys.stdout = io.StringIO()
-                _sys.stderr = io.StringIO()
-                return self
-            
-            def __exit__(self, exc_type, exc_val, exc_tb):
-                _sys.stdout = self._original_stdout
-                _sys.stderr = self._original_stderr
+        # Use the same TTS models as positive sample generation
+        tts_models_config = _get_tts_models_config()
+        # Extract unique model names (some have multiple speaker configs)
+        tts_models = list(dict.fromkeys([config["model"] for config in tts_models_config]))
         
         valid_count = 0
         failed_count = 0
@@ -1613,6 +1586,7 @@ def _generate_negative_samples(wake_word: str, n_samples: int, base_dir: Path) -
                 for attempt in range(2):  # Try twice: once with cache, once forcing re-download
                     try:
                         # Load model (allow auto-download, suppress only progress bars)
+                        import logging
                         logging.getLogger('TTS').setLevel(logging.WARNING)
                         
                         if attempt == 1:
@@ -1700,7 +1674,7 @@ def _generate_negative_samples(wake_word: str, n_samples: int, base_dir: Path) -
                             # Generate with speed variation
                             speed = 1.0 + np.random.uniform(-0.15, 0.15)
                             
-                            with SuppressOutput():
+                            with _SuppressOutput():
                                 # Use speaker_id for multi-speaker models
                                 if speaker_id:
                                     tts.tts_to_file(text=text, speaker=speaker_id, file_path=str(output_file), speed=speed)
