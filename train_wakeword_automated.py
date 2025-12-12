@@ -2127,11 +2127,21 @@ def _resample_audio_file(args):
         torchaudio.save(str(file_path), waveform_resampled, target_sr)
         
         return (file_path, sr, 'converted')
+    except KeyboardInterrupt:
+        raise
     except Exception as e:
-        return (file_path, None, f'error: {e}')
+        return (file_path, None, f'error: {str(e)[:100]}')
 
-def check_and_fix_audio_sample_rates(config: dict) -> bool:
-    """Check and convert all background/RIR files to 16kHz using parallel processing"""
+def check_and_fix_audio_sample_rates(config: dict, remove_corrupted: bool = True) -> bool:
+    """Check and convert all background/RIR files to 16kHz using parallel processing
+    
+    Args:
+        config: Configuration dict with 'background_paths' and 'rir_paths'
+        remove_corrupted: If True, delete files that cannot be loaded or converted
+    
+    Returns:
+        True if all files were processed successfully, False if errors occurred
+    """
     import torchaudio
     from concurrent.futures import ThreadPoolExecutor, as_completed
     from tqdm import tqdm
@@ -2147,6 +2157,7 @@ def check_and_fix_audio_sample_rates(config: dict) -> bool:
             bg_path = Path(bg_path)
             if bg_path.exists():
                 all_audio_paths.extend(list(bg_path.glob("**/*.wav")))
+                all_audio_paths.extend(list(bg_path.glob("**/*.mp3")))
     
     if 'rir_paths' in config:
         for rir_path in config['rir_paths']:
@@ -2160,20 +2171,48 @@ def check_and_fix_audio_sample_rates(config: dict) -> bool:
     
     print_info(f"Found {len(all_audio_paths)} audio files to check")
     
-    # First pass: check sample rates
-    print_info("Checking sample rates...")
+    # First pass: check sample rates and identify corrupted files
+    print_info("Scanning files for sample rate and corruption...")
     files_to_convert = []
+    corrupted_files = []
     
     for audio_file in tqdm(all_audio_paths, desc="Scanning files", unit="files"):
         try:
             _, sr = torchaudio.load(str(audio_file))
             if sr != target_sr:
                 files_to_convert.append((audio_file, target_sr))
+        except KeyboardInterrupt:
+            raise
         except Exception as e:
-            print_warning(f"Could not load {audio_file.name}: {e}")
+            # File is corrupted or unreadable
+            corrupted_files.append((audio_file, str(e)[:100]))
     
+    # Handle corrupted files
+    if corrupted_files:
+        print_warning(f"Found {len(corrupted_files)} corrupted or unreadable files")
+        
+        if remove_corrupted:
+            print_info("Removing corrupted files...")
+            removed = 0
+            for file_path, error in corrupted_files:
+                try:
+                    file_path.unlink()
+                    removed += 1
+                except Exception as e:
+                    print_warning(f"Could not remove {file_path.name}: {e}")
+            
+            print_success(f"Removed {removed} corrupted files")
+        else:
+            print_warning("Corrupted files will be skipped during training:")
+            for file_path, error in corrupted_files[:10]:  # Show first 10
+                print_warning(f"  {file_path.name}: {error}")
+            if len(corrupted_files) > 10:
+                print_warning(f"  ... and {len(corrupted_files) - 10} more")
+    
+    # Check if conversion needed
     if not files_to_convert:
-        print_success(f"All {len(all_audio_paths)} files already have correct sample rate ({target_sr} Hz)")
+        valid_count = len(all_audio_paths) - len(corrupted_files)
+        print_success(f"All {valid_count} valid files already have correct sample rate ({target_sr} Hz)")
         return True
     
     print_warning(f"Found {len(files_to_convert)} files with incorrect sample rate")
@@ -2182,7 +2221,7 @@ def check_and_fix_audio_sample_rates(config: dict) -> bool:
     # Parallel conversion
     n_workers = min(os.cpu_count() or 4, len(files_to_convert))
     converted = 0
-    errors = 0
+    conversion_errors = []
     
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
         futures = {executor.submit(_resample_audio_file, args): args[0] for args in files_to_convert}
@@ -2194,16 +2233,33 @@ def check_and_fix_audio_sample_rates(config: dict) -> bool:
                 if status == 'converted':
                     converted += 1
                 elif status.startswith('error'):
-                    errors += 1
-                    print_warning(f"Failed to convert {file_path.name}: {status}")
+                    conversion_errors.append((file_path, status))
                 
                 pbar.update(1)
     
     print_success(f"Converted {converted} files to {target_sr} Hz")
     
-    if errors > 0:
-        print_warning(f"{errors} files failed to convert")
-        return False
+    # Handle conversion errors
+    if conversion_errors:
+        print_warning(f"{len(conversion_errors)} files failed to convert")
+        
+        if remove_corrupted:
+            print_info("Removing files that failed conversion...")
+            removed = 0
+            for file_path, error in conversion_errors:
+                try:
+                    file_path.unlink()
+                    removed += 1
+                except Exception as e:
+                    print_warning(f"Could not remove {file_path.name}: {e}")
+            
+            print_success(f"Removed {removed} files that failed conversion")
+        else:
+            for file_path, error in conversion_errors[:10]:
+                print_warning(f"  {file_path.name}: {error}")
+            if len(conversion_errors) > 10:
+                print_warning(f"  ... and {len(conversion_errors) - 10} more")
+            return False
     
     return True
 
@@ -2370,6 +2426,29 @@ def main():
     # Step 2.7: Check background datasets (optional but recommended)
     background_status = check_background_datasets(base_dir)
     
+    # Step 2.8: Convert all audio files to 16kHz
+    print_header("Audio Sample Rate Verification")
+    print_info("Checking and converting background audio files to 16kHz...")
+    print_info("This ensures compatibility with training pipeline")
+    print_info("Corrupted files will be automatically removed")
+    
+    # Create a minimal config dict with just the paths
+    audio_config = {
+        'background_paths': [
+            str(base_dir / "audioset_16k"),
+            str(base_dir / "fma")
+        ],
+        'rir_paths': [
+            str(base_dir / "mit_rirs"),
+            str(base_dir / "MIT_environmental_impulse_responses")
+        ]
+    }
+    
+    if not check_and_fix_audio_sample_rates(audio_config, remove_corrupted=True):
+        print_warning("Some audio files could not be converted to 16kHz")
+        if not get_yes_no("Continue anyway? (may cause training errors)", default=True):
+            sys.exit(1)
+    
     print_success("\nAll environment checks passed!")
     
     # Step 3: Get wake word
@@ -2445,16 +2524,6 @@ def main():
         base_dir=base_dir,
         use_gpu=has_gpu
     )
-    
-    # Step 7.5: Check and fix audio file sample rates
-    print_info("\nVerifying audio file sample rates...")
-    with open(config_file) as f:
-        config = yaml.safe_load(f)
-    
-    if not check_and_fix_audio_sample_rates(config):
-        print_warning("Some audio files could not be converted")
-        if not get_yes_no("Continue anyway? (may cause augmentation failures)", default=False):
-            sys.exit(1)
     
     # Step 8: Generate samples
     if not generate_samples(wake_word, pronunciations, n_samples, base_dir):
