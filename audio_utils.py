@@ -16,16 +16,24 @@ import torchaudio.transforms as T
 
 @contextlib.contextmanager
 def suppress_stderr():
-    """Temporarily suppress stderr to hide low-level library errors (mpg123, etc.)"""
-    null_fd = os.open(os.devnull, os.O_WRONLY)
-    old_stderr = os.dup(2)
+    """Temporarily suppress stderr to hide low-level library errors (mpg123, etc.)
+    
+    Windows-compatible version using context redirection instead of file descriptors
+    """
+    import io
+    
+    # Save original stderr
+    old_stderr = sys.stderr
+    
     try:
-        os.dup2(null_fd, 2)
+        # Redirect stderr to null
+        sys.stderr = open(os.devnull, 'w')
         yield
     finally:
-        os.dup2(old_stderr, 2)
-        os.close(null_fd)
-        os.close(old_stderr)
+        # Restore stderr and close null file
+        if sys.stderr != old_stderr:
+            sys.stderr.close()
+        sys.stderr = old_stderr
 
 
 def check_audio_file(audio_file):
@@ -116,31 +124,43 @@ def scan_and_convert_audio_files(
     corrupted_files = []
     scanned = 0
     
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(check_audio_file, f): f for f in audio_files}
-        
-        if show_progress:
-            pbar = tqdm(total=len(audio_files), desc="Scanning", unit="files")
-        
-        for future in as_completed(futures):
-            audio_file, sr, error = future.result()
-            
-            if error:
-                corrupted_files.append((audio_file, error))
-            elif sr != target_sr:
-                files_to_convert.append((audio_file, sr))
-            
-            scanned += 1
+    try:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(check_audio_file, f): f for f in audio_files}
             
             if show_progress:
-                # Update failed percentage every 100 files
-                if scanned % 100 == 0:
-                    failed_pct = (len(corrupted_files) / scanned * 100) if scanned > 0 else 0
-                    pbar.set_postfix({'Failed': f'{len(corrupted_files)} ({failed_pct:.1f}%)'})
-                pbar.update(1)
-        
-        if show_progress:
-            pbar.close()
+                pbar = tqdm(total=len(audio_files), desc="Scanning", unit="files")
+            
+            try:
+                for future in as_completed(futures):
+                    audio_file, sr, error = future.result()
+                    
+                    if error:
+                        corrupted_files.append((audio_file, error))
+                    elif sr != target_sr:
+                        files_to_convert.append((audio_file, sr))
+                    
+                    scanned += 1
+                    
+                    if show_progress:
+                        # Update failed percentage every 100 files
+                        if scanned % 100 == 0:
+                            failed_pct = (len(corrupted_files) / scanned * 100) if scanned > 0 else 0
+                            pbar.set_postfix({'Failed': f'{len(corrupted_files)} ({failed_pct:.1f}%)'})
+                        pbar.update(1)
+            except KeyboardInterrupt:
+                if show_progress:
+                    pbar.close()
+                    print("\n[INTERRUPTED] Cancelling audio file scanning...")
+                # Cancel remaining futures
+                for future in futures:
+                    future.cancel()
+                raise
+            finally:
+                if show_progress:
+                    pbar.close()
+    except KeyboardInterrupt:
+        raise
     
     # Report scan results
     if show_progress:
