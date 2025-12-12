@@ -9,14 +9,51 @@ Write-Host "OpenWakeWord Training Environment Setup" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
-# Check Python version
+# Check and install Python 3.11.x
 Write-Host "Checking Python version..." -ForegroundColor Yellow
 $pythonVersion = python --version 2>&1
 if ($pythonVersion -match "Python 3\.11\.") {
     Write-Host "[OK] $pythonVersion" -ForegroundColor Green
 } else {
-    Write-Host "[ERROR] Python 3.11.x is required. Found: $pythonVersion" -ForegroundColor Red
-    exit 1
+    Write-Host "[WARNING] Python 3.11.x not found. Current: $pythonVersion" -ForegroundColor Yellow
+    Write-Host "Installing Python 3.11.9 via winget..." -ForegroundColor Yellow
+    
+    # Check if winget is available
+    try {
+        $wingetVersion = winget --version 2>&1
+        Write-Host "  winget version: $wingetVersion" -ForegroundColor Gray
+    } catch {
+        Write-Host "[ERROR] winget not found. Please install App Installer from Microsoft Store." -ForegroundColor Red
+        Write-Host "  Or download Python 3.11.9 from https://www.python.org/downloads/" -ForegroundColor Red
+        exit 1
+    }
+    
+    # Install Python 3.11.9
+    Write-Host "  Downloading and installing Python 3.11.9..." -ForegroundColor Gray
+    winget install Python.Python.3.11 --version 3.11.9 --silent --accept-package-agreements --accept-source-agreements
+    
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "[OK] Python 3.11.9 installed successfully" -ForegroundColor Green
+        
+        # Refresh environment variables
+        Write-Host "  Refreshing PATH environment variable..." -ForegroundColor Gray
+        $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
+        
+        # Verify installation
+        Start-Sleep -Seconds 2
+        $pythonVersion = python --version 2>&1
+        if ($pythonVersion -match "Python 3\.11\.") {
+            Write-Host "[OK] Verified: $pythonVersion" -ForegroundColor Green
+        } else {
+            Write-Host "[WARNING] Python installed but may require terminal restart" -ForegroundColor Yellow
+            Write-Host "  Please close this terminal and run the script again" -ForegroundColor Yellow
+            exit 0
+        }
+    } else {
+        Write-Host "[ERROR] Python installation failed. Exit code: $LASTEXITCODE" -ForegroundColor Red
+        Write-Host "  Please manually install Python 3.11.9 from https://www.python.org/downloads/" -ForegroundColor Red
+        exit 1
+    }
 }
 
 # Check NVIDIA GPU
