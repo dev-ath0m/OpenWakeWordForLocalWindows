@@ -2105,6 +2105,108 @@ def train_model(config_file: Path, base_dir: Path) -> bool:
         print_error(f"Training failed: {e}")
         return False
 
+def _resample_audio_file(args):
+    """Worker function to resample a single audio file to 16kHz"""
+    import torchaudio
+    import torchaudio.transforms as T
+    
+    file_path, target_sr = args
+    try:
+        # Load audio
+        waveform, sr = torchaudio.load(str(file_path))
+        
+        # Skip if already correct sample rate
+        if sr == target_sr:
+            return (file_path, sr, 'skipped')
+        
+        # Resample
+        resampler = T.Resample(orig_freq=sr, new_freq=target_sr)
+        waveform_resampled = resampler(waveform)
+        
+        # Save back to same file
+        torchaudio.save(str(file_path), waveform_resampled, target_sr)
+        
+        return (file_path, sr, 'converted')
+    except Exception as e:
+        return (file_path, None, f'error: {e}')
+
+def check_and_fix_audio_sample_rates(config: dict) -> bool:
+    """Check and convert all background/RIR files to 16kHz using parallel processing"""
+    import torchaudio
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from tqdm import tqdm
+    
+    print_header("Checking Audio File Sample Rates")
+    
+    target_sr = 16000
+    all_audio_paths = []
+    
+    # Collect all audio file paths from config
+    if 'background_paths' in config:
+        for bg_path in config['background_paths']:
+            bg_path = Path(bg_path)
+            if bg_path.exists():
+                all_audio_paths.extend(list(bg_path.glob("**/*.wav")))
+    
+    if 'rir_paths' in config:
+        for rir_path in config['rir_paths']:
+            rir_path = Path(rir_path)
+            if rir_path.exists():
+                all_audio_paths.extend(list(rir_path.glob("**/*.wav")))
+    
+    if not all_audio_paths:
+        print_warning("No audio files found in background_paths or rir_paths")
+        return True
+    
+    print_info(f"Found {len(all_audio_paths)} audio files to check")
+    
+    # First pass: check sample rates
+    print_info("Checking sample rates...")
+    files_to_convert = []
+    
+    for audio_file in tqdm(all_audio_paths, desc="Scanning files", unit="files"):
+        try:
+            _, sr = torchaudio.load(str(audio_file))
+            if sr != target_sr:
+                files_to_convert.append((audio_file, target_sr))
+        except Exception as e:
+            print_warning(f"Could not load {audio_file.name}: {e}")
+    
+    if not files_to_convert:
+        print_success(f"All {len(all_audio_paths)} files already have correct sample rate ({target_sr} Hz)")
+        return True
+    
+    print_warning(f"Found {len(files_to_convert)} files with incorrect sample rate")
+    print_info(f"Converting {len(files_to_convert)} files to {target_sr} Hz...")
+    
+    # Parallel conversion
+    n_workers = min(os.cpu_count() or 4, len(files_to_convert))
+    converted = 0
+    errors = 0
+    
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        futures = {executor.submit(_resample_audio_file, args): args[0] for args in files_to_convert}
+        
+        with tqdm(total=len(files_to_convert), desc="Converting files", unit="files") as pbar:
+            for future in as_completed(futures):
+                file_path, original_sr, status = future.result()
+                
+                if status == 'converted':
+                    converted += 1
+                elif status.startswith('error'):
+                    errors += 1
+                    print_warning(f"Failed to convert {file_path.name}: {status}")
+                
+                pbar.update(1)
+    
+    print_success(f"Converted {converted} files to {target_sr} Hz")
+    
+    if errors > 0:
+        print_warning(f"{errors} files failed to convert")
+        return False
+    
+    return True
+
 def export_to_onnx(model_dir: Path, model_name: str) -> Optional[Path]:
     """Export model to ONNX format"""
     print_header("Exporting to ONNX")
@@ -2343,6 +2445,16 @@ def main():
         base_dir=base_dir,
         use_gpu=has_gpu
     )
+    
+    # Step 7.5: Check and fix audio file sample rates
+    print_info("\nVerifying audio file sample rates...")
+    with open(config_file) as f:
+        config = yaml.safe_load(f)
+    
+    if not check_and_fix_audio_sample_rates(config):
+        print_warning("Some audio files could not be converted")
+        if not get_yes_no("Continue anyway? (may cause augmentation failures)", default=False):
+            sys.exit(1)
     
     # Step 8: Generate samples
     if not generate_samples(wake_word, pronunciations, n_samples, base_dir):
