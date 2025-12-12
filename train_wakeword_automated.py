@@ -1238,7 +1238,7 @@ def _setup_tts_environment(base_dir: Path):
     import torch
     from TTS.utils.radam import RAdam
     from collections import defaultdict
-    torch.serialization.add_safe_globals([RAdam, defaultdict])
+    torch.serialization.add_safe_globals([RAdam, defaultdict, dict])
     
     # Suppress verbose TTS logging
     import logging
@@ -1550,120 +1550,73 @@ def _generate_negative_samples(wake_word: str, n_samples: int, base_dir: Path) -
         
         # Use the same TTS models as positive sample generation
         tts_models_config = _get_tts_models_config()
-        # Extract unique model names (some have multiple speaker configs)
-        tts_models = list(dict.fromkeys([config["model"] for config in tts_models_config]))
         
         valid_count = 0
         failed_count = 0
         
-        # Calculate samples per model configuration (including multi-speaker models)
-        # your_tts: 2 speakers, vctk: 2 speakers (p225, p226)
-        total_model_configs = len(tts_models) + 3  # +3 for extra speaker configs
-        samples_per_model = n_samples // total_model_configs
+        # Generate samples using each model configuration
+        import threading
+        import time as time_module
         
-        for model_name in tts_models:
+        for model_config in tts_models_config:
+            if valid_count >= n_samples:
+                break
+            
+            model_name = model_config["model"]
             model_short = model_name.split('/')[-1]
             
-            # Handle multi-speaker models
-            if 'your_tts' in model_name:
-                speakers = [
-                    ("female-en-5", "female"),
-                    ("male-en-2", "male")
-                ]
-            elif 'vctk' in model_name:
-                speakers = [
-                    ("p225", "female"),  # British female
-                    ("p226", "male")     # British male
-                ]
-            else:
-                speakers = [(None, None)]  # Single-speaker models
-            
-            for speaker_id, speaker_label in speakers:
-                speaker_suffix = f" ({speaker_label})" if speaker_label else ""
-                print_info(f"\nLoading model: {model_short}{speaker_suffix}...")
+            try:
+                # Load model with spinner feedback (same as positive samples)
+                init_done = threading.Event()
+                def init_spinner():
+                    spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+                    idx = 0
+                    start_time = time_module.time()
+                    while not init_done.is_set():
+                        elapsed = time_module.time() - start_time
+                        print(f"\r{Colors.OKCYAN}  {spinner_chars[idx]} Loading {model_short}... (elapsed: {int(elapsed)}s){Colors.ENDC}", 
+                              end='', flush=True)
+                        idx = (idx + 1) % len(spinner_chars)
+                        time_module.sleep(0.1)
+                    print("\r" + " " * 80 + "\r", end='', flush=True)
                 
-                tts = None
-                for attempt in range(2):  # Try twice: once with cache, once forcing re-download
-                    try:
-                        # Load model (allow auto-download, suppress only progress bars)
-                        import logging
-                        logging.getLogger('TTS').setLevel(logging.WARNING)
-                        
-                        if attempt == 1:
-                            print_warning(f"Retrying {model_short} with forced re-download...")
-                            # Clear TTS cache more thoroughly
-                            import shutil
-                            
-                            # TTS stores models in TTS_HOME/tts_models/... 
-                            tts_home = base_dir / "tts"
-                            
-                            # Build path to specific model (e.g., tts_models/en/ljspeech/glow-tts)
-                            model_parts = model_name.split('/')
-                            model_cache_path = tts_home
-                            for part in model_parts:
-                                model_cache_path = model_cache_path / part
-                            
-                            if model_cache_path.exists():
-                                print_info(f"Removing corrupted cache: {model_cache_path}")
-                                shutil.rmtree(model_cache_path, ignore_errors=True)
-                            
-                            # Also try parent directory in case structure is different
-                            parent_cache = tts_home / model_name.replace('/', '--')
-                            if parent_cache.exists():
-                                print_info(f"Removing alternative cache location: {parent_cache}")
-                                shutil.rmtree(parent_cache, ignore_errors=True)
-                            
-                            # Give filesystem time to sync
-                            import time
-                            time.sleep(0.5)
-                        
-                        print_info(f"Loading {model_short}{speaker_suffix} (may download if not cached)...")
-                        tts = TTS(model_name=model_name).to(device)
-                        logging.getLogger('TTS').setLevel(logging.CRITICAL)
-                        print_success(f"Model {model_short}{speaker_suffix} loaded successfully")
-                        break  # Success, exit retry loop
-                        
-                    except Exception as e:
-                        if attempt == 0:
-                            print_warning(f"Model {model_short} failed on first attempt: {e}")
-                            continue  # Try again with re-download
-                        else:
-                            # Both attempts failed - provide detailed diagnostics
-                            print_error(f"Model {model_short} failed after retry: {e}")
-                            print_error("Cannot continue without all negative sample models")
-                            
-                            # Help user diagnose the issue
-                            print_info("Diagnostic information:")
-                            tts_home = base_dir / "tts"
-                            if tts_home.exists():
-                                print_info(f"TTS cache directory exists: {tts_home}")
-                                # List what's actually in the cache
-                                try:
-                                    cache_contents = list(tts_home.rglob("*"))[:10]  # First 10 items
-                                    if cache_contents:
-                                        print_info("Cache contents (first 10 items):")
-                                        for item in cache_contents:
-                                            print_info(f"  - {item.relative_to(tts_home)}")
-                                    else:
-                                        print_warning("Cache directory is empty!")
-                                except Exception:
-                                    pass
-                            else:
-                                print_warning(f"TTS cache directory doesn't exist: {tts_home}")
-                            
-                            print_info("\nPossible solutions:")
-                            print_info("  1. Manually delete the TTS cache and retry: rmdir /s /q tts")
-                            print_info("  2. Check disk space and permissions")
-                            print_info("  3. Run the script again - other models will continue generation")
-                            
-                            break  # Exit retry loop for this model
+                init_thread = threading.Thread(target=init_spinner)
+                init_thread.daemon = True
+                init_thread.start()
                 
-                if tts is None:
-                    print_warning(f"Model {model_short}{speaker_suffix} failed - continuing with remaining models")
-                    continue  # Try next speaker/model
+                tts = TTS(model_name=model_name)
+                init_done.set()
+                init_thread.join(timeout=0.5)
+                
+                # Transfer to GPU with spinner
+                gpu_done = threading.Event()
+                def gpu_spinner():
+                    spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+                    idx = 0
+                    start_time = time_module.time()
+                    while not gpu_done.is_set():
+                        elapsed = time_module.time() - start_time
+                        print(f"\r{Colors.OKCYAN}  {spinner_chars[idx]} Transferring {model_short} to {device}... (elapsed: {int(elapsed)}s){Colors.ENDC}", 
+                              end='', flush=True)
+                        idx = (idx + 1) % len(spinner_chars)
+                        time_module.sleep(0.1)
+                    print("\r" + " " * 80 + "\r", end='', flush=True)
+                
+                gpu_thread = threading.Thread(target=gpu_spinner)
+                gpu_thread.daemon = True
+                gpu_thread.start()
+                
+                tts = tts.to(device)
+                gpu_done.set()
+                gpu_thread.join(timeout=0.5)
+                
+                print_success(f"Model {model_short} loaded successfully")
                 
                 # Initialize progress bar for this model
                 from tqdm import tqdm
+                gender = model_config.get("gender", "voice")
+                speaker = model_config.get("speaker", "")
+                speaker_suffix = f"_{speaker}_{gender}" if speaker else f"_{gender}"
                 model_desc = f"{model_short}{speaker_suffix}"
                 pbar = tqdm(total=n_samples, desc=f"Generating negatives ({model_desc})", 
                            unit="samples", initial=valid_count,
@@ -1671,62 +1624,56 @@ def _generate_negative_samples(wake_word: str, n_samples: int, base_dir: Path) -
                 
                 try:
                     # Cycle through adversarial texts
-                    for i, text in enumerate(adversarial_texts):
+                    for text in adversarial_texts:
                         if valid_count >= n_samples:
                             break
                         
                         output_file = negative_train_dir / f"neg_{valid_count}.wav"
                         
                         try:
-                            # Generate with speed variation
-                            speed = 1.0 + np.random.uniform(-0.15, 0.15)
+                            # Generate with speed variation (matching positive samples)
+                            speed = 1.0 + np.random.uniform(-0.1, 0.1)
                             
+                            # Build kwargs using model_config (same as positive samples)
+                            kwargs = {
+                                'text': text,
+                                'file_path': str(output_file),
+                                'speed': speed
+                            }
+                            
+                            if 'speaker' in model_config:
+                                kwargs['speaker'] = model_config['speaker']
+                            if 'language' in model_config:
+                                kwargs['language'] = model_config['language']
+                            
+                            # Generate sample with suppressed output
                             with _SuppressOutput():
-                                # Use speaker_id for multi-speaker models
-                                if speaker_id:
-                                    tts.tts_to_file(text=text, speaker=speaker_id, file_path=str(output_file), speed=speed)
-                                else:
-                                    tts.tts_to_file(text=text, file_path=str(output_file), speed=speed)
+                                tts.tts_to_file(**kwargs)
                             
-                            # Process audio
-                            sr, audio = wavfile.read(str(output_file))
-                            
-                            # Skip if too long
-                            if len(audio) / sr > 4.0:
-                                output_file.unlink()
+                            # Process and validate audio using shared helper
+                            if _process_audio_sample(output_file):
+                                valid_count += 1
+                            else:
                                 failed_count += 1
                                 continue
-                            
-                            # Trim and resample
-                            audio_float = audio.astype(np.float32)
-                            audio_trimmed, _ = librosa.effects.trim(audio_float, top_db=30)
-                            
-                            if sr != 16000:
-                                from scipy import signal
-                                num_samples_resampled = int(len(audio_trimmed) * 16000 / sr)
-                                audio_resampled = signal.resample(audio_trimmed, num_samples_resampled)
-                                audio = audio_resampled.astype(np.int16)
-                            else:
-                                audio = audio_trimmed.astype(np.int16)
-                            
-                            wavfile.write(str(output_file), 16000, audio)
-                            valid_count += 1
                             
                             # Update progress bar
                             total_attempts = valid_count + failed_count
                             fail_pct = (failed_count / total_attempts * 100) if total_attempts > 0 else 0
+                            text_display = text if len(text) <= 15 else text[:12] + '...'
+                            
                             pbar.n = valid_count
-                            pbar.set_postfix({'Failed': f'{fail_pct:.1f}%', 'Text': f"'{text[:15]}...'"})
+                            pbar.set_postfix({
+                                'Failed': f'{fail_pct:.1f}%',
+                                'Text': f"'{text_display}'"
+                            })
                             pbar.refresh()
                             
-                        except Exception as e:
+                        except Exception:
                             failed_count += 1
                             if output_file.exists():
                                 output_file.unlink()
                             continue
-                    
-                    if valid_count >= n_samples:
-                        break
                     
                     # Close progress bar
                     pbar.close()
@@ -1736,13 +1683,18 @@ def _generate_negative_samples(wake_word: str, n_samples: int, base_dir: Path) -
                     # Close progress bar on error
                     if 'pbar' in locals():
                         pbar.close()
-                    print_error(f"Critical error with model {model_short}{speaker_suffix}: {model_error}")
+                    print_error(f"Critical error with model {model_short}: {model_error}")
                     import traceback
                     traceback.print_exc()
-                    continue  # Try next speaker/model instead of aborting
+                    continue  # Try next model instead of aborting
                 
-                if valid_count >= n_samples:
-                    break
+            except Exception as e:
+                # Model loading error
+                print_warning(f"Model {model_short} failed to load: {e}")
+                continue
+            
+            if valid_count >= n_samples:
+                break
         
         # Final validation - require at least 80% of target samples (allow some model failures)
         if valid_count < n_samples * 0.8:
