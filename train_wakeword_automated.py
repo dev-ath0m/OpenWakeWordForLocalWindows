@@ -1279,7 +1279,8 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                 # Fix PyTorch 2.6 weights_only issue for TTS models
                 import torch
                 from TTS.utils.radam import RAdam
-                torch.serialization.add_safe_globals([RAdam])
+                from collections import defaultdict
+                torch.serialization.add_safe_globals([RAdam, defaultdict])
                 
                 # Spinner for model loading
                 loading_done = threading.Event()
