@@ -1243,12 +1243,23 @@ def _setup_tts_environment(base_dir: Path):
     from collections import defaultdict
     torch.serialization.add_safe_globals([RAdam, defaultdict, dict])
     
+    # Force CUDA device selection
+    if torch.cuda.is_available():
+        # Set default CUDA device
+        torch.cuda.set_device(0)  # Use first NVIDIA GPU
+        # Force PyTorch to use CUDA
+        os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+        device = "cuda:0"
+        print(f"Using GPU: {torch.cuda.get_device_name(0)}")
+        print(f"CUDA Version: {torch.version.cuda}")
+    else:
+        device = "cpu"
+        print("CUDA not available, using CPU")
+    
     # Suppress verbose TTS logging
     import logging
     logging.getLogger('TTS').setLevel(logging.CRITICAL)
     
-    # Check GPU availability
-    device = "cuda" if torch.cuda.is_available() else "cpu"
     return device
 
 
@@ -1327,10 +1338,12 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                 loading_done.set()
                 spinner_thread.join(timeout=0.5)
                 
-                # Load TTS model
+                # Load TTS model with GPU support
                 try:
-                    tts = TTS(model_name=model_path, gpu=(device == "cuda"))
-                    print_success(f"Model {model_short} initialized")
+                    # TTS library requires gpu=True parameter AND proper device string
+                    use_gpu = (device == "cuda:0")
+                    tts = TTS(model_name=model_path, gpu=use_gpu)
+                    print_success(f"Model {model_short} initialized (GPU: {use_gpu})")
                 except Exception as e:
                     print_error(f"Failed to initialize TTS model: {e}")
                     import traceback
@@ -1609,7 +1622,9 @@ def _generate_negative_samples(wake_word: str, n_samples: int, n_samples_val: in
                 init_thread.daemon = True
                 init_thread.start()
                 
-                tts = TTS(model_name=model_name, gpu=(device == "cuda"))
+                # TTS library requires gpu=True parameter
+                use_gpu = (device == "cuda:0")
+                tts = TTS(model_name=model_name, gpu=use_gpu)
                 init_done.set()
                 init_thread.join(timeout=0.5)
                 
