@@ -13,6 +13,7 @@ import shutil
 from pathlib import Path
 from typing import Optional, Tuple
 import json
+import psutil
 
 # Color codes for terminal output
 class Colors:
@@ -948,10 +949,11 @@ def create_training_config(
     # Determine paths
     model_name = wake_word.lower().replace(' ', '_')
     clips_dir = base_dir / "clips" / "generated" / model_name
-    output_dir = base_dir / "trained_models" / model_name
+    # Note: output_dir should NOT include model_name - train.py adds it
+    output_dir = base_dir / "trained_models"
     acav100m_features = base_dir / "openwakeword_features_ACAV100M_2000_hrs_16bit.npy"
     
-    # Create output directory
+    # Create output directory (train.py will create model_name subdirectory)
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # Build configuration matching OpenWakeWord's expected format
@@ -1116,23 +1118,28 @@ def generate_samples(wake_word: str, pronunciations: list, n_samples: int, base_
 
 
 def _get_tts_models_config():
-    """Get the unified TTS model configuration for both positive and negative samples"""
+    """Get the unified TTS model configuration for both positive and negative samples
+    
+    Models are categorized by speed:
+    - Fast models (1-2 sec/sample): Used for bulk generation
+    - Slow models (8-12 sec/sample): Limited to 20 samples for voice variety
+    """
     return [
-        {"model": "tts_models/en/ljspeech/tacotron2-DDC", "gender": "female"},
-        {"model": "tts_models/en/ljspeech/tacotron2-DCA", "gender": "female"},
-        {"model": "tts_models/en/ljspeech/glow-tts", "gender": "female"},
-        {"model": "tts_models/en/ljspeech/speedy-speech", "gender": "female"},
-        {"model": "tts_models/en/ljspeech/fast_pitch", "gender": "female"},
-        {"model": "tts_models/en/ljspeech/overflow", "gender": "female"},
-        {"model": "tts_models/en/ljspeech/neural_hmm", "gender": "female"},
-        {"model": "tts_models/en/ljspeech/vits", "gender": "female"},
-        {"model": "tts_models/en/vctk/vits", "speaker": "p225", "gender": "female"},
-        {"model": "tts_models/en/vctk/vits", "speaker": "p226", "gender": "male"},
-        {"model": "tts_models/en/jenny/jenny", "gender": "female"},
-        {"model": "tts_models/en/sam/tacotron-DDC", "gender": "male"},
-        {"model": "tts_models/en/ek1/tacotron2", "gender": "male"},
-        {"model": "tts_models/multilingual/multi-dataset/your_tts", "speaker": "male-en-2", "language": "en"},
-        {"model": "tts_models/multilingual/multi-dataset/your_tts", "speaker": "female-en-5", "language": "en"},
+        # Fast models (1-2 seconds per sample on GPU) - no limit
+        {"model": "tts_models/en/ljspeech/vits", "gender": "female", "max_samples": None},
+        {"model": "tts_models/en/ljspeech/fast_pitch", "gender": "female", "max_samples": None},
+        {"model": "tts_models/en/ljspeech/glow-tts", "gender": "female", "max_samples": None},
+        {"model": "tts_models/en/vctk/vits", "speaker": "p225", "gender": "female", "max_samples": None},
+        {"model": "tts_models/en/vctk/vits", "speaker": "p226", "gender": "male", "max_samples": None},
+        {"model": "tts_models/en/jenny/jenny", "gender": "female", "max_samples": None},
+        {"model": "tts_models/multilingual/multi-dataset/your_tts", "speaker": "male-en-2", "language": "en", "max_samples": None},
+        {"model": "tts_models/multilingual/multi-dataset/your_tts", "speaker": "female-en-5", "language": "en", "max_samples": None},
+        
+        # Slow but high-quality models (8-12 seconds per sample) - limited to 20 samples for variety
+        {"model": "tts_models/en/ljspeech/tacotron2-DDC", "gender": "female", "max_samples": 20},
+        {"model": "tts_models/en/ljspeech/tacotron2-DCA", "gender": "female", "max_samples": 20},
+        {"model": "tts_models/en/ljspeech/neural_hmm", "gender": "female", "max_samples": 20},
+        {"model": "tts_models/en/sam/tacotron-DDC", "gender": "male", "max_samples": 20},
     ]
 
 
@@ -1232,6 +1239,47 @@ def _process_audio_sample(audio_file: Path, target_sr: int = 16000, max_duration
         return False
 
 
+def _get_process_usage():
+    """Get current process CPU and GPU usage for progress monitoring"""
+    try:
+        # Get CPU usage for current process
+        process = psutil.Process()
+        cpu_percent = process.cpu_percent(interval=0.1)
+        
+        # Get GPU usage if available
+        try:
+            import pynvml
+            gpu_util = "N/A"
+            try:
+                pynvml.nvmlInit()
+                handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+                util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                gpu_util = f"{util.gpu}%"
+            except:
+                pass
+        except ImportError:
+            # pynvml not available, try nvidia-smi
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    result = subprocess.run(
+                        ['nvidia-smi', '--query-gpu=utilization.gpu', '--format=csv,noheader,nounits', '--id=0'],
+                        capture_output=True, text=True, timeout=0.5
+                    )
+                    if result.returncode == 0:
+                        gpu_util = f"{result.stdout.strip()}%"
+                    else:
+                        gpu_util = "N/A"
+                else:
+                    gpu_util = "N/A"
+            except:
+                gpu_util = "N/A"
+        
+        return cpu_percent, gpu_util
+    except:
+        return 0.0, "N/A"
+
+
 def _setup_tts_environment(base_dir: Path):
     """Setup TTS environment with PyTorch 2.6 compatibility fixes"""
     import os
@@ -1297,6 +1345,17 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
         failed_count = 0
         
         for model_config in tts_models:
+            # Check if this model has a sample limit (for slow models)
+            model_limit = model_config.get("max_samples", None)
+            if model_limit is not None:
+                # For limited models, only generate up to the limit
+                model_train_target = min(model_limit, n_samples - train_count)
+                model_test_target = min(model_limit // 10, n_samples_val - test_count)
+            else:
+                # No limit - use normal targets
+                model_train_target = n_samples
+                model_test_target = n_samples_val
+            
             model_path = model_config["model"]
             model_short = model_path.split('/')[-1]
             
@@ -1340,10 +1399,21 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                 
                 # Load TTS model with GPU support
                 try:
-                    # TTS library requires gpu=True parameter AND proper device string
-                    use_gpu = (device == "cuda:0")
-                    tts = TTS(model_name=model_path, gpu=use_gpu)
-                    print_success(f"Model {model_short} initialized (GPU: {use_gpu})")
+                    # Load model first without gpu parameter (deprecated)
+                    import warnings
+                    warnings.filterwarnings('ignore', message='.*gpu.*will be deprecated.*')
+                    tts = TTS(model_name=model_path)
+                    
+                    # Manually force synthesizer and vocoder to GPU
+                    if device == "cuda:0":
+                        if hasattr(tts, 'synthesizer') and tts.synthesizer is not None:
+                            if hasattr(tts.synthesizer, 'tts_model'):
+                                tts.synthesizer.tts_model = tts.synthesizer.tts_model.to(device)
+                        if hasattr(tts, 'vocoder') and tts.vocoder is not None:
+                            if hasattr(tts.vocoder, 'model'):
+                                tts.vocoder.model = tts.vocoder.model.to(device)
+                    
+                    print_success(f"Model {model_short} initialized on {device.upper()}\")")
                 except Exception as e:
                     print_error(f"Failed to initialize TTS model: {e}")
                     import traceback
@@ -1372,13 +1442,20 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                 
                 # Initialize tqdm progress bar
                 from tqdm import tqdm
-                pbar = tqdm(total=n_samples, desc=f"Generating {model_short}", 
-                           unit="samples", bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]')
+                gender = model_config.get("gender", "voice")
+                speaker = model_config.get("speaker", "")
+                speaker_suffix = f"_{speaker}_{gender}" if speaker else f"_{gender}"
+                model_desc = f"{model_short}{speaker_suffix}"
+                total_target = n_samples + n_samples_val
+                pbar = tqdm(total=total_target, desc=f"Positive ({model_desc})", 
+                           unit="samples", initial=0,
+                           bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]')
                 
                 for variation in pronunciations:
                     # Generate training samples
                     combo_count = 0
-                    while train_count < n_samples and combo_count < samples_per_combo:
+                    model_train_count = 0  # Track samples for this model
+                    while train_count < n_samples and combo_count < samples_per_combo and model_train_count < model_train_target:
                         output_file = positive_train_dir / f"{model_short}_{train_count}.wav"
                         
                         try:
@@ -1403,19 +1480,25 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                             # Process and validate audio
                             if _process_audio_sample(output_file):
                                 train_count += 1
+                                model_train_count += 1
                                 combo_count += 1
                             else:
                                 failed_count += 1
                                 combo_count += 1
                                 continue
                             
-                            # Update progress bar
+                            # Update progress bar with CPU/GPU usage
+                            cpu_usage, gpu_usage = _get_process_usage()
+                            text_display = variation[:30] + '...' if len(variation) > 30 else variation
                             total_valid = train_count + test_count
                             pbar.n = total_valid
                             pbar.set_postfix({
                                 'Train': train_count,
                                 'Test': test_count,
-                                'Failed': failed_count
+                                'Failed': failed_count,
+                                'CPU': f'{cpu_usage:.0f}%',
+                                'GPU': gpu_usage,
+                                'Text': text_display
                             })
                             pbar.refresh()
                                 
@@ -1428,8 +1511,9 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                     
                     # Generate test samples
                     combo_test_count = 0
-                    test_samples_per_combo = max(1, n_samples_val // (len(tts_models) * len(pronunciations)))
-                    while test_count < n_samples_val and combo_test_count < test_samples_per_combo:
+                    model_test_count = 0  # Track test samples for this model
+                    test_samples_per_combo = max(1, model_test_target // len(pronunciations))
+                    while test_count < n_samples_val and combo_test_count < test_samples_per_combo and model_test_count < model_test_target:
                         output_file = positive_test_dir / f"{model_short}_test_{test_count}.wav"
                         
                         try:
@@ -1454,13 +1538,15 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                             # Process and validate audio
                             if _process_audio_sample(output_file):
                                 test_count += 1
+                                model_test_count += 1
                                 combo_test_count += 1
                             else:
                                 failed_count += 1
                                 combo_test_count += 1
                                 continue
                             
-                            # Update progress bar
+                            # Update progress bar with CPU/GPU usage
+                            cpu_usage, gpu_usage = _get_process_usage()
                             total_valid = train_count + test_count
                             var_display = variation if len(variation) <= 15 else variation[:12] + '...'
                             pbar.n = total_valid
@@ -1468,8 +1554,11 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                                 'Train': train_count,
                                 'Test': test_count,
                                 'Failed': failed_count,
+                                'CPU': f'{cpu_usage:.0f}%',
+                                'GPU': gpu_usage,
                                 'Text': f"'{var_display}'"
                             })
+                            pbar.refresh()
                             pbar.refresh()
                                 
                         except Exception:
@@ -1600,6 +1689,15 @@ def _generate_negative_samples(wake_word: str, n_samples: int, n_samples_val: in
             if train_count >= n_samples and test_count >= n_samples_val:
                 break
             
+            # Check if this model has a sample limit (for slow models)
+            model_limit = model_config.get("max_samples", None)
+            if model_limit is not None:
+                model_train_target = min(model_limit, n_samples - train_count)
+                model_test_target = min(model_limit // 10, n_samples_val - test_count)
+            else:
+                model_train_target = n_samples
+                model_test_target = n_samples_val
+            
             model_name = model_config["model"]
             model_short = model_name.split('/')[-1]
             
@@ -1622,9 +1720,10 @@ def _generate_negative_samples(wake_word: str, n_samples: int, n_samples_val: in
                 init_thread.daemon = True
                 init_thread.start()
                 
-                # TTS library requires gpu=True parameter
-                use_gpu = (device == "cuda:0")
-                tts = TTS(model_name=model_name, gpu=use_gpu)
+                # Load model without deprecated gpu parameter
+                import warnings
+                warnings.filterwarnings('ignore', message='.*gpu.*will be deprecated.*')
+                tts = TTS(model_name=model_name)
                 init_done.set()
                 init_thread.join(timeout=0.5)
                 
@@ -1646,7 +1745,15 @@ def _generate_negative_samples(wake_word: str, n_samples: int, n_samples_val: in
                 gpu_thread.daemon = True
                 gpu_thread.start()
                 
-                # tts = tts.to(device)  # This doesn't work for TTS - use gpu=True instead
+                # Manually force synthesizer and vocoder to GPU
+                if device == "cuda:0":
+                    if hasattr(tts, 'synthesizer') and tts.synthesizer is not None:
+                        if hasattr(tts.synthesizer, 'tts_model'):
+                            tts.synthesizer.tts_model = tts.synthesizer.tts_model.to(device)
+                    if hasattr(tts, 'vocoder') and tts.vocoder is not None:
+                        if hasattr(tts.vocoder, 'model'):
+                            tts.vocoder.model = tts.vocoder.model.to(device)
+                
                 gpu_done.set()
                 gpu_thread.join(timeout=0.5)
                 
@@ -1659,14 +1766,15 @@ def _generate_negative_samples(wake_word: str, n_samples: int, n_samples_val: in
                 speaker_suffix = f"_{speaker}_{gender}" if speaker else f"_{gender}"
                 model_desc = f"{model_short}{speaker_suffix}"
                 total_target = n_samples + n_samples_val
-                pbar = tqdm(total=total_target, desc=f"Generating negatives ({model_desc})", 
-                           unit="samples", initial=train_count + test_count,
+                pbar = tqdm(total=total_target, desc=f"Negative ({model_desc})", 
+                           unit="samples", initial=0,
                            bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]')
                 
                 try:
                     # Cycle through adversarial texts for training samples
                     text_idx = 0
-                    while train_count < n_samples and text_idx < len(adversarial_texts):
+                    model_train_count = 0  # Track samples for this model
+                    while train_count < n_samples and text_idx < len(adversarial_texts) and model_train_count < model_train_target:
                         text = adversarial_texts[text_idx % len(adversarial_texts)]
                         text_idx += 1
                         
@@ -1695,19 +1803,23 @@ def _generate_negative_samples(wake_word: str, n_samples: int, n_samples_val: in
                             # Process and validate audio using shared helper
                             if _process_audio_sample(output_file):
                                 train_count += 1
+                                model_train_count += 1
                             else:
                                 failed_count += 1
                                 continue
                             
-                            # Update progress bar
+                            # Update progress bar with CPU/GPU usage
+                            cpu_usage, gpu_usage = _get_process_usage()
                             total_valid = train_count + test_count
-                            text_display = text if len(text) <= 15 else text[:12] + '...'
+                            text_display = text if len(text) <= 30 else text[:27] + '...'
                             pbar.n = total_valid
                             pbar.set_postfix({
                                 'Train': train_count,
                                 'Test': test_count,
                                 'Failed': failed_count,
-                                'Text': f"'{text_display}'"
+                                'CPU': f'{cpu_usage:.0f}%',
+                                'GPU': gpu_usage,
+                                'Text': text_display
                             })
                             pbar.refresh()
                             
@@ -1719,7 +1831,8 @@ def _generate_negative_samples(wake_word: str, n_samples: int, n_samples_val: in
                     
                     # Generate test samples
                     text_idx = 0
-                    while test_count < n_samples_val and text_idx < len(adversarial_texts) * 2:
+                    model_test_count = 0  # Track test samples for this model
+                    while test_count < n_samples_val and text_idx < len(adversarial_texts) * 2 and model_test_count < model_test_target:
                         text = adversarial_texts[text_idx % len(adversarial_texts)]
                         text_idx += 1
                         
@@ -1748,19 +1861,23 @@ def _generate_negative_samples(wake_word: str, n_samples: int, n_samples_val: in
                             # Process and validate audio using shared helper
                             if _process_audio_sample(output_file):
                                 test_count += 1
+                                model_test_count += 1
                             else:
                                 failed_count += 1
                                 continue
                             
-                            # Update progress bar
+                            # Update progress bar with CPU/GPU usage
+                            cpu_usage, gpu_usage = _get_process_usage()
                             total_valid = train_count + test_count
-                            text_display = text if len(text) <= 15 else text[:12] + '...'
+                            text_display = text if len(text) <= 30 else text[:27] + '...'
                             pbar.n = total_valid
                             pbar.set_postfix({
                                 'Train': train_count,
                                 'Test': test_count,
                                 'Failed': failed_count,
-                                'Text': f"'{text_display}'"
+                                'CPU': f'{cpu_usage:.0f}%',
+                                'GPU': gpu_usage,
+                                'Text': text_display
                             })
                             pbar.refresh()
                             
