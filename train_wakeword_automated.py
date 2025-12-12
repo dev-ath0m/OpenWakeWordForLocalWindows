@@ -2331,16 +2331,23 @@ def _patch_openwakeword_train_py(base_dir: Path) -> bool:
         with open(data_py_path, 'r', encoding='utf-8') as f:
             data_content = f.read()
         
-        # Check if patches already applied (look for minimal API version)
+        # Check if patches already applied (look for minimal API version without fallback)
         minimal_api_signature = 'onnx2tf.convert(\n                input_onnx_file_path=onnx_model_path,\n                output_folder_path=tmp_dir\n            )'
-        if minimal_api_signature in train_content and 'explicit close + gc' in data_content:
+        no_fallback_signature = 'raise RuntimeError(f"TFLite conversion failed: {e}") from e'
+        
+        if minimal_api_signature in train_content and no_fallback_signature in train_content and 'explicit close + gc' in data_content:
             return True  # Already patched with correct version
         
-        # Check if old patch with deprecated API is present
-        old_patch_present = 'output_tfjs=False' in train_content and 'onnx2tf.convert(' in train_content
+        # Check if old patch with deprecated API or onnx-tf fallback is present
+        needs_update = (
+            ('output_tfjs=False' in train_content and 'onnx2tf.convert(' in train_content) or
+            ('from onnx_tf.backend import prepare' in train_content)
+        )
         
-        if old_patch_present:
+        if needs_update:
             print_warning("Old onnx2tf patch detected - updating to current API...")
+        elif 'onnx2tf' in train_content:
+            print_info("Updating OpenWakeWord patches to remove onnx-tf fallback...")
         else:
             print_info("Applying compatibility patches to OpenWakeWord...")
         
@@ -2372,7 +2379,6 @@ def convert_onnx_to_tflite(onnx_model_path, output_path):
     """Converts an ONNX version of an openwakeword model to the Tensorflow tflite format.
     
     Uses onnx2tf for conversion (compatible with TensorFlow 2.16+).
-    Falls back to onnx-tf if onnx2tf fails (requires TF 2.12-2.14).
     """
     import tensorflow as tf
     
@@ -2402,32 +2408,12 @@ def convert_onnx_to_tflite(onnx_model_path, output_path):
                 raise RuntimeError("onnx2tf did not generate a TFLite file")
                 
     except Exception as e:
-        logging.warning(f"onnx2tf conversion failed: {e}")
-        logging.info("Attempting fallback to onnx-tf (requires TensorFlow 2.12-2.14)...")
-        
-        # Fallback to onnx-tf (only works with TF 2.12-2.14)
-        try:
-            import onnx
-            from onnx_tf.backend import prepare
-            
-            onnx_model = onnx.load(onnx_model_path)
-            tf_rep = prepare(onnx_model, device="CPU")
-            with tempfile.TemporaryDirectory() as tmp_dir:
-                tf_rep.export_graph(os.path.join(tmp_dir, "tf_model"))
-                converter = tf.lite.TFLiteConverter.from_saved_model(os.path.join(tmp_dir, "tf_model"))
-                tflite_model = converter.convert()
-
-                logging.info(f"####\\nSaving tflite model to '{output_path}'")
-                with open(output_path, 'wb') as f:
-                    f.write(tflite_model)
-                    
-        except Exception as fallback_error:
-            logging.error(f"Both onnx2tf and onnx-tf conversion failed.")
-            logging.error(f"onnx-tf error: {fallback_error}")
-            logging.info("TFLite conversion requires either:")
-            logging.info("  - onnx2tf with TensorFlow 2.16+ (pip install onnx2tf)")
-            logging.info("  - onnx-tf with TensorFlow 2.12-2.14 (pip install onnx-tf)")
-            raise RuntimeError("TFLite conversion failed with all methods") from fallback_error
+        logging.error(f"onnx2tf conversion failed: {e}")
+        logging.error(f"TFLite conversion requires onnx2tf with TensorFlow 2.16+")
+        logging.error(f"Please ensure onnx2tf is installed: pip install onnx2tf==1.20.0")
+        import traceback
+        logging.error(f"Full error:\n{traceback.format_exc()}")
+        raise RuntimeError(f"TFLite conversion failed: {e}") from e
 
     return None'''
         
