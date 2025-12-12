@@ -616,6 +616,10 @@ def clone_openwakeword(base_dir: Path) -> bool:
     if not patch_openwakeword_data(openwakeword_dir):
         print_warning("Failed to patch data.py - may have file permission errors on Windows")
     
+    # Patch train.py for Windows multiprocessing
+    if not patch_openwakeword_train_multiprocessing(openwakeword_dir):
+        print_warning("Failed to patch train.py multiprocessing - training may fail on Windows")
+    
     return True
 
 def patch_openwakeword_train_script(openwakeword_dir: Path) -> bool:
@@ -811,6 +815,85 @@ def patch_openwakeword_data(openwakeword_dir: Path) -> bool:
         
     except Exception as e:
         print_error(f"Patching data.py failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def patch_openwakeword_train_multiprocessing(openwakeword_dir: Path) -> bool:
+    """Patch OpenWakeWord's train.py to fix Windows multiprocessing issues"""
+    train_script = openwakeword_dir / "openwakeword" / "train.py"
+    
+    if not train_script.exists():
+        print_error(f"train.py not found at {train_script}")
+        return False
+    
+    print_info("Patching train.py for Windows multiprocessing compatibility...")
+    
+    try:
+        content = train_script.read_text(encoding='utf-8')
+        original_content = content
+        
+        # Fix 1: Replace lambda functions with named functions (for pickling)
+        content = content.replace(
+            '''        label_transforms = {}
+        for key in ["positive"] + list(config["feature_data_files"].keys()) + ["adversarial_negative"]:
+            if key == "positive":
+                label_transforms[key] = lambda x: [1 for i in x]
+            else:
+                label_transforms[key] = lambda x: [0 for i in x]''',
+            '''        # Define label transform functions (Windows-compatible, no lambda)
+        def positive_label_transform(x):
+            return [1 for i in x]
+        
+        def negative_label_transform(x):
+            return [0 for i in x]
+        
+        label_transforms = {}
+        for key in ["positive"] + list(config["feature_data_files"].keys()) + ["adversarial_negative"]:
+            if key == "positive":
+                label_transforms[key] = positive_label_transform
+            else:
+                label_transforms[key] = negative_label_transform'''
+        )
+        
+        # Fix 2: Set num_workers=0 on Windows (multiprocessing doesn't work well)
+        content = content.replace(
+            '''        n_cpus = os.cpu_count()
+        if n_cpus is None:
+            n_cpus = 1
+        else:
+            n_cpus = n_cpus//2
+        X_train = torch.utils.data.DataLoader(IterDataset(batch_generator),
+                                              batch_size=None, num_workers=n_cpus, prefetch_factor=16)''',
+            '''        # On Windows, use num_workers=0 to avoid multiprocessing pickle errors
+        import platform
+        if platform.system() == "Windows":
+            n_workers = 0
+            prefetch = None
+        else:
+            n_cpus = os.cpu_count()
+            if n_cpus is None:
+                n_workers = 1
+            else:
+                n_workers = n_cpus//2
+            prefetch = 16
+        
+        X_train = torch.utils.data.DataLoader(IterDataset(batch_generator),
+                                              batch_size=None, num_workers=n_workers, 
+                                              prefetch_factor=prefetch)'''
+        )
+        
+        if content == original_content:
+            print_warning("No changes made - train.py may already be patched or format has changed")
+            return True
+        
+        train_script.write_text(content, encoding='utf-8')
+        print_success("train.py patched successfully - Windows multiprocessing fixed")
+        return True
+        
+    except Exception as e:
+        print_error(f"Patching train.py multiprocessing failed: {e}")
         import traceback
         traceback.print_exc()
         return False
@@ -2318,7 +2401,7 @@ def augment_samples(config_file: Path, base_dir: Path) -> bool:
     )
 
 def train_model(config_file: Path, base_dir: Path) -> bool:
-    """Train the wake word model"""
+    """Train the wake word model with progress monitoring"""
     print_header("Training Model")
     
     print_info("Starting model training")
@@ -2333,7 +2416,15 @@ def train_model(config_file: Path, base_dir: Path) -> bool:
     
     train_log_path = base_dir / "training_output.log"
     
-    return _run_subprocess_with_logging(
+    print_info("Training in progress - check log for detailed progress")
+    print_info(f"Log file: {train_log_path}")
+    print(f"\n{Colors.BOLD}Training steps:{Colors.ENDC}")
+    print(f"  1. Loading models and features")
+    print(f"  2. Training neural network (this takes the longest)")
+    print(f"  3. Evaluating on validation data")
+    print(f"  4. Saving final model\n")
+    
+    result = _run_subprocess_with_logging(
         command=[sys.executable, str(train_script),
                 '--training_config', str(config_file),
                 '--train_model'],
@@ -2341,6 +2432,11 @@ def train_model(config_file: Path, base_dir: Path) -> bool:
         cwd=openwakeword_dir,
         description="Training"
     )
+    
+    if result:
+        print_success("Training completed successfully")
+    
+    return result
 
 
 
