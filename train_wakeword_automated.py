@@ -2105,32 +2105,7 @@ def train_model(config_file: Path, base_dir: Path) -> bool:
         print_error(f"Training failed: {e}")
         return False
 
-def _resample_audio_file(args):
-    """Worker function to resample a single audio file to 16kHz"""
-    import torchaudio
-    import torchaudio.transforms as T
-    
-    file_path, target_sr = args
-    try:
-        # Load audio
-        waveform, sr = torchaudio.load(str(file_path))
-        
-        # Skip if already correct sample rate
-        if sr == target_sr:
-            return (file_path, sr, 'skipped')
-        
-        # Resample
-        resampler = T.Resample(orig_freq=sr, new_freq=target_sr)
-        waveform_resampled = resampler(waveform)
-        
-        # Save back to same file
-        torchaudio.save(str(file_path), waveform_resampled, target_sr)
-        
-        return (file_path, sr, 'converted')
-    except KeyboardInterrupt:
-        raise
-    except Exception as e:
-        return (file_path, None, f'error: {str(e)[:100]}')
+
 
 def check_and_fix_audio_sample_rates(config: dict, remove_corrupted: bool = True) -> bool:
     """Check and convert all background/RIR files to 16kHz using parallel processing
@@ -2142,9 +2117,7 @@ def check_and_fix_audio_sample_rates(config: dict, remove_corrupted: bool = True
     Returns:
         True if all files were processed successfully, False if errors occurred
     """
-    import torchaudio
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    from tqdm import tqdm
+    from audio_utils import scan_and_convert_audio_files
     
     print_header("Checking Audio File Sample Rates")
     
@@ -2166,100 +2139,27 @@ def check_and_fix_audio_sample_rates(config: dict, remove_corrupted: bool = True
                 all_audio_paths.extend(list(rir_path.glob("**/*.wav")))
     
     if not all_audio_paths:
-        print_warning("No audio files found in background_paths or rir_paths")
+        print_success("No audio files found to check")
         return True
     
     print_info(f"Found {len(all_audio_paths)} audio files to check")
     
-    # First pass: check sample rates and identify corrupted files
-    print_info("Scanning files for sample rate and corruption...")
-    files_to_convert = []
-    corrupted_files = []
+    # Use shared utility for scanning and conversion
+    results = scan_and_convert_audio_files(
+        audio_files=all_audio_paths,
+        target_sr=target_sr,
+        max_workers=None,  # Auto-detect optimal workers
+        remove_corrupted=remove_corrupted,
+        show_progress=True
+    )
     
-    for audio_file in tqdm(all_audio_paths, desc="Scanning files", unit="files"):
-        try:
-            _, sr = torchaudio.load(str(audio_file))
-            if sr != target_sr:
-                files_to_convert.append((audio_file, target_sr))
-        except KeyboardInterrupt:
-            raise
-        except Exception as e:
-            # File is corrupted or unreadable
-            corrupted_files.append((audio_file, str(e)[:100]))
-    
-    # Handle corrupted files
-    if corrupted_files:
-        print_warning(f"Found {len(corrupted_files)} corrupted or unreadable files")
-        
-        if remove_corrupted:
-            print_info("Removing corrupted files...")
-            removed = 0
-            for file_path, error in corrupted_files:
-                try:
-                    file_path.unlink()
-                    removed += 1
-                except Exception as e:
-                    print_warning(f"Could not remove {file_path.name}: {e}")
-            
-            print_success(f"Removed {removed} corrupted files")
-        else:
-            print_warning("Corrupted files will be skipped during training:")
-            for file_path, error in corrupted_files[:10]:  # Show first 10
-                print_warning(f"  {file_path.name}: {error}")
-            if len(corrupted_files) > 10:
-                print_warning(f"  ... and {len(corrupted_files) - 10} more")
-    
-    # Check if conversion needed
-    if not files_to_convert:
-        valid_count = len(all_audio_paths) - len(corrupted_files)
-        print_success(f"All {valid_count} valid files already have correct sample rate ({target_sr} Hz)")
-        return True
-    
-    print_warning(f"Found {len(files_to_convert)} files with incorrect sample rate")
-    print_info(f"Converting {len(files_to_convert)} files to {target_sr} Hz...")
-    
-    # Parallel conversion
-    n_workers = min(os.cpu_count() or 4, len(files_to_convert))
-    converted = 0
-    conversion_errors = []
-    
-    with ThreadPoolExecutor(max_workers=n_workers) as executor:
-        futures = {executor.submit(_resample_audio_file, args): args[0] for args in files_to_convert}
-        
-        with tqdm(total=len(files_to_convert), desc="Converting files", unit="files") as pbar:
-            for future in as_completed(futures):
-                file_path, original_sr, status = future.result()
-                
-                if status == 'converted':
-                    converted += 1
-                elif status.startswith('error'):
-                    conversion_errors.append((file_path, status))
-                
-                pbar.update(1)
-    
-    print_success(f"Converted {converted} files to {target_sr} Hz")
-    
-    # Handle conversion errors
-    if conversion_errors:
-        print_warning(f"{len(conversion_errors)} files failed to convert")
-        
-        if remove_corrupted:
-            print_info("Removing files that failed conversion...")
-            removed = 0
-            for file_path, error in conversion_errors:
-                try:
-                    file_path.unlink()
-                    removed += 1
-                except Exception as e:
-                    print_warning(f"Could not remove {file_path.name}: {e}")
-            
-            print_success(f"Removed {removed} files that failed conversion")
-        else:
-            for file_path, error in conversion_errors[:10]:
-                print_warning(f"  {file_path.name}: {error}")
-            if len(conversion_errors) > 10:
-                print_warning(f"  ... and {len(conversion_errors) - 10} more")
-            return False
+    # Report results
+    print_success(f"Processed {results['total']} files:")
+    print_info(f"  - Already correct: {results['already_correct']}")
+    print_info(f"  - Converted: {results['converted']}")
+    if results['corrupted'] > 0:
+        status = "removed" if remove_corrupted else "found"
+        print_warning(f"  - Corrupted ({status}): {results['corrupted']}")
     
     return True
 
@@ -2448,6 +2348,63 @@ def main():
         print_warning("Some audio files could not be converted to 16kHz")
         if not get_yes_no("Continue anyway? (may cause training errors)", default=True):
             sys.exit(1)
+    
+    # Step 2.9: Check if we have sufficient samples, offer to download more
+    audioset_path = base_dir / "audioset_16k"
+    audioset_count = len(list(audioset_path.rglob("*.wav"))) if audioset_path.exists() else 0
+    
+    # If we don't have many AudioSet samples, offer to download more
+    if audioset_count < 1000:  # Recommend at least 1000 background samples
+        print_header("Background Audio Samples")
+        print_info(f"Current AudioSet samples: {audioset_count}")
+        print_info("Recommended: 1000+ samples for best quality")
+        print()
+        print_info("You can download more background samples from YouTube (AudioSet)")
+        print_info("This will significantly improve model quality by providing diverse backgrounds")
+        print_warning(f"Note: You have {audioset_count} samples. More samples = better quality model")
+        print()
+        
+        if get_yes_no("Download additional AudioSet samples now?", default=False):
+            # Check if download_audioset.py exists
+            download_script = Path("download_audioset.py")
+            if not download_script.exists():
+                print_error("download_audioset.py not found in workspace")
+                print_info("You can download it from the OpenWakeWord repository")
+            else:
+                print_info("\nStarting AudioSet download...")
+                print_warning("This will take several hours. You can stop with Ctrl+C and resume later.")
+                print()
+                
+                # Run download script
+                import subprocess
+                try:
+                    result = subprocess.run(
+                        [sys.executable, str(download_script), str(audioset_path)],
+                        check=False
+                    )
+                    
+                    if result.returncode == 0:
+                        new_count = len(list(audioset_path.rglob("*.wav")))
+                        print_success(f"AudioSet download complete: {new_count} files total")
+                        
+                        # Convert newly downloaded files to 16kHz
+                        print_info("Converting newly downloaded files to 16kHz...")
+                        check_and_fix_audio_sample_rates(audio_config, remove_corrupted=True)
+                    else:
+                        print_warning("AudioSet download incomplete or failed")
+                        print_info("Continuing with existing samples")
+                        
+                except KeyboardInterrupt:
+                    print_warning("\nAudioSet download interrupted")
+                    print_info("Continuing with existing samples")
+                except Exception as e:
+                    print_error(f"Failed to run AudioSet download: {e}")
+                    print_info("Continuing with existing samples")
+        else:
+            print_info("Skipping additional downloads")
+            print_info(f"Continuing with {audioset_count} AudioSet samples")
+            if audioset_count < 100:
+                print_warning("Low sample count may result in reduced model quality")
     
     print_success("\nAll environment checks passed!")
     

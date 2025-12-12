@@ -9,13 +9,44 @@ Write-Host "OpenWakeWord Training Environment Setup" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
+Write-Host "Note: This script requires Python 3.11.x" -ForegroundColor DarkGray
+Write-Host "      If you have multiple Python versions, we'll use Python Launcher (py.exe)" -ForegroundColor DarkGray
+Write-Host ""
+
 # Check and install Python 3.11.x
 Write-Host "Checking Python version..." -ForegroundColor Yellow
-$pythonVersion = python --version 2>&1
-if ($pythonVersion -match "Python 3\.11\.") {
-    Write-Host "[OK] $pythonVersion" -ForegroundColor Green
-} else {
-    Write-Host "[WARNING] Python 3.11.x not found. Current: $pythonVersion" -ForegroundColor Yellow
+
+# Try to find Python 3.11 using Python Launcher (py.exe)
+$python311Found = $false
+$pythonCommand = "python"
+
+try {
+    # Check if py.exe (Python Launcher) is available
+    $pyVersion = py -3.11 --version 2>&1
+    if ($pyVersion -match "Python 3\.11\.") {
+        Write-Host "[OK] Found Python 3.11 via Python Launcher: $pyVersion" -ForegroundColor Green
+        $python311Found = $true
+        $pythonCommand = "py -3.11"
+    }
+} catch {
+    # py.exe not available or Python 3.11 not found, continue checking
+}
+
+# If not found via launcher, check default python command
+if (-not $python311Found) {
+    $pythonVersion = python --version 2>&1
+    if ($pythonVersion -match "Python 3\.11\.") {
+        Write-Host "[OK] $pythonVersion" -ForegroundColor Green
+        $python311Found = $true
+        $pythonCommand = "python"
+    }
+}
+
+if (-not $python311Found) {
+    Write-Host "[WARNING] Python 3.11.x not found" -ForegroundColor Yellow
+    if ($pythonVersion) {
+        Write-Host "  Currently available: $pythonVersion" -ForegroundColor Gray
+    }
     Write-Host "Installing Python 3.11.9 via winget..." -ForegroundColor Yellow
     
     # Check if winget is available
@@ -39,19 +70,33 @@ if ($pythonVersion -match "Python 3\.11\.") {
         Write-Host "  Refreshing PATH environment variable..." -ForegroundColor Gray
         $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
         
-        # Verify installation
+        # Verify installation using Python Launcher
         Start-Sleep -Seconds 2
-        $pythonVersion = python --version 2>&1
-        if ($pythonVersion -match "Python 3\.11\.") {
-            Write-Host "[OK] Verified: $pythonVersion" -ForegroundColor Green
-        } else {
-            Write-Host "[WARNING] Python installed but may require terminal restart" -ForegroundColor Yellow
-            Write-Host "  Please close this terminal and run the script again" -ForegroundColor Yellow
-            exit 0
+        try {
+            $pyVersion = py -3.11 --version 2>&1
+            if ($pyVersion -match "Python 3\.11\.") {
+                Write-Host "[OK] Verified via Python Launcher: $pyVersion" -ForegroundColor Green
+                $python311Found = $true
+                $pythonCommand = "py -3.11"
+            }
+        } catch {
+            # Fall back to checking default python command
+            $pythonVersion = python --version 2>&1
+            if ($pythonVersion -match "Python 3\.11\.") {
+                Write-Host "[OK] Verified: $pythonVersion" -ForegroundColor Green
+                $python311Found = $true
+                $pythonCommand = "python"
+            } else {
+                Write-Host "[WARNING] Python installed but may require terminal restart" -ForegroundColor Yellow
+                Write-Host "  Please close this terminal and run the script again" -ForegroundColor Yellow
+                Write-Host "  After restart, use: py -3.11 --version  to verify" -ForegroundColor Yellow
+                exit 0
+            }
         }
     } else {
         Write-Host "[ERROR] Python installation failed. Exit code: $LASTEXITCODE" -ForegroundColor Red
         Write-Host "  Please manually install Python 3.11.9 from https://www.python.org/downloads/" -ForegroundColor Red
+        Write-Host "  Note: If Python 3.11 is already installed, try: py -3.11 --version" -ForegroundColor Red
         exit 1
     }
 }
@@ -119,8 +164,23 @@ Write-Host "`nCreating virtual environment..." -ForegroundColor Yellow
 if (Test-Path "wakeword_env") {
     Write-Host "[OK] Virtual environment already exists" -ForegroundColor Green
 } else {
+    # Determine Python executable to use
+    $pythonExe = if ($pythonCommand -eq "py -3.11") {
+        # For Python Launcher, we need to extract the actual executable path
+        $python311Path = & py -3.11 -c "import sys; print(sys.executable)" 2>&1
+        if ($python311Path -and (Test-Path $python311Path)) {
+            $python311Path
+        } else {
+            "python"  # Fallback
+        }
+    } else {
+        "python"
+    }
+    
+    Write-Host "  Using Python: $pythonExe" -ForegroundColor Gray
+    
     # Show progress bar during venv creation
-    $job = Start-Job -ScriptBlock { param($pythonPath) & $pythonPath -m venv wakeword_env } -ArgumentList (Get-Command python).Source
+    $job = Start-Job -ScriptBlock { param($pythonPath) & $pythonPath -m venv wakeword_env } -ArgumentList $pythonExe
     
     $i = 0
     while ($job.State -eq 'Running') {
