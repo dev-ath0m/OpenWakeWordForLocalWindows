@@ -1519,8 +1519,9 @@ def _generate_tts_samples_with_model(
         model_train_target = min(model_limit, n_samples - train_count)
         model_test_target = min(model_limit // 10, n_samples_val - test_count)
     else:
-        model_train_target = n_samples
-        model_test_target = n_samples_val
+        # Calculate remaining samples needed (not the global total)
+        model_train_target = n_samples - train_count
+        model_test_target = n_samples_val - test_count
     
     # Get native sample rate
     try:
