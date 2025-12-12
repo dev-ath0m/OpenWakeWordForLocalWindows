@@ -57,7 +57,8 @@ onnx2tf==1.20.0
 # For TFLite conversion (required for homie.tflite)
 tensorflow==2.16.2
 tensorflow-probability==0.24.0  # Compatible with TensorFlow 2.16.x
-onnx-tf>=1.10.0
+# Note: onnx-tf is deprecated and incompatible with TF 2.16+ (uses Keras 3.x)
+# Use onnx2tf instead for TFLite conversion
 
 # ===== Utilities =====
 tqdm
