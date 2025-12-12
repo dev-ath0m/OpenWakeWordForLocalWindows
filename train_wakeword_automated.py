@@ -1558,6 +1558,7 @@ def _generate_tts_samples_with_model(
     progress_update_interval = 10
     text_idx = 0
     model_train_count = 0
+    model_test_count = 0  # Initialize test counter at start
     
     # Generate training samples
     samples_per_text = max(1, (n_samples - train_count) // len(texts))
