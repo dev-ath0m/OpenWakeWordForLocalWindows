@@ -13,6 +13,8 @@ import shutil
 import logging
 from datetime import datetime, timedelta
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 # Setup logging
 logging.basicConfig(
@@ -37,6 +39,7 @@ ESTIMATED_BYTES_PER_CLIP = 1.2 * 1024 * 1024  # ~1.2MB per 10-second 16kHz mono 
 MAX_CLIPS_TARGET = int((TARGET_DATASET_SIZE_GB * 1024 * 1024 * 1024) / ESTIMATED_BYTES_PER_CLIP)  # ~35,000 clips
 MIN_SAMPLES_PER_CATEGORY = 5  # Minimum samples per category before moving to next round
 MAX_SAMPLES_PER_CATEGORY = 100  # Maximum samples per category to prevent over-representation
+MAX_WORKERS = 8  # Number of parallel download threads
 
 def check_dependencies():
     """Check if yt-dlp and ffmpeg are installed"""
@@ -375,21 +378,16 @@ def download_from_csv(csv_path, output_dir, subset_name, class_labels=None, limi
         'categories': len(category_samples),
         'category_coverage': {}  # label_id -> count
     }
-    logging.info(f"Already downloaded: {existing_count}")
-    logging.info(f"To download: {len(segments) - existing_count}")
-    logging.info(f"{'='*60}\n")
-    
-    stats = {
-        'total': len(segments),
-        'success': 0,
-        'failed': 0,
-        'skipped': existing_count,
-        'unavailable': 0
-    }
     
     start_time_overall = time.time()
     
-    for i, segment in enumerate(segments_ordered, 1):
+    # Thread-safe counters
+    stats_lock = threading.Lock()
+    progress_counter = 0
+    
+    def download_task(segment_data):
+        """Download a single segment (for parallel execution)"""
+        i, segment = segment_data
         youtube_id = segment[0]
         start_sec = segment[1]
         end_sec = segment[2]
@@ -399,49 +397,73 @@ def download_from_csv(csv_path, output_dir, subset_name, class_labels=None, limi
         
         # Skip if already exists
         if os.path.exists(output_path):
-            stats['success'] += 1
-            # Update category coverage
-            for label in labels:
-                stats['category_coverage'][label] = stats['category_coverage'].get(label, 0) + 1
-            if i % 100 == 0:
-                logging.info(f"  Progress: {i}/{len(segments_ordered)} ({stats['success']} OK, {stats['failed']} failed)")
-            continue
+            with stats_lock:
+                stats['success'] += 1
+                # Update category coverage
+                for label in labels:
+                    stats['category_coverage'][label] = stats['category_coverage'].get(label, 0) + 1
+            return True, labels
         
         # Download
         success = download_audio_segment(youtube_id, start_sec, end_sec, output_path)
         
-        if success:
-            stats['success'] += 1
-            # Update category coverage
-            for label in labels:
-                stats['category_coverage'][label] = stats['category_coverage'].get(label, 0) + 1
-        else:
-            stats['failed'] += 1
-            stats['unavailable'] += 1
+        with stats_lock:
+            if success:
+                stats['success'] += 1
+                # Update category coverage
+                for label in labels:
+                    stats['category_coverage'][label] = stats['category_coverage'].get(label, 0) + 1
+            else:
+                stats['failed'] += 1
+                stats['unavailable'] += 1
         
-        # Progress update every 10 files
-        if i % 10 == 0:
-            elapsed = time.time() - start_time_overall
-            rate = i / elapsed if elapsed > 0 else 0
-            remaining = (len(segments_ordered) - i) / rate if rate > 0 else 0
+        return success, labels
+    
+    # Parallel download with thread pool
+    logging.info(f"Starting parallel download with {MAX_WORKERS} workers...")
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        # Submit all tasks
+        future_to_segment = {
+            executor.submit(download_task, (i, segment)): i 
+            for i, segment in enumerate(segments_ordered, 1)
+        }
+        
+        # Process completed downloads
+        for future in as_completed(future_to_segment):
+            i = future_to_segment[future]
+            progress_counter += 1
             
-            # Calculate category statistics
-            categories_with_min = sum(1 for count in stats['category_coverage'].values() if count >= MIN_SAMPLES_PER_CATEGORY)
-            categories_with_max = sum(1 for count in stats['category_coverage'].values() if count >= MAX_SAMPLES_PER_CATEGORY)
-            avg_per_category = sum(stats['category_coverage'].values()) / len(stats['category_coverage']) if stats['category_coverage'] else 0
+            try:
+                future.result()
+            except Exception as e:
+                logging.warning(f"Error processing segment {i}: {e}")
+                with stats_lock:
+                    stats['failed'] += 1
             
-            # Estimate current size
-            current_size_gb = stats['success'] * ESTIMATED_BYTES_PER_CLIP / 1024 / 1024 / 1024
-            
-            logging.info(
-                f"  Progress: {i}/{len(segments_ordered)} "
-                f"({stats['success']} OK, {stats['failed']} failed) "
-                f"- Size: {current_size_gb:.1f}GB/{TARGET_DATASET_SIZE_GB}GB "
-                f"- Categories: {categories_with_min}/{stats['categories']} with {MIN_SAMPLES_PER_CATEGORY}+, "
-                f"{categories_with_max} at max ({MAX_SAMPLES_PER_CATEGORY}), "
-                f"avg {avg_per_category:.1f} per category "
-                f"- ETA: {timedelta(seconds=int(remaining))}"
-            )
+            # Progress update every 10 files
+            if progress_counter % 10 == 0:
+                with stats_lock:
+                    elapsed = time.time() - start_time_overall
+                    rate = progress_counter / elapsed if elapsed > 0 else 0
+                    remaining = (len(segments_ordered) - progress_counter) / rate if rate > 0 else 0
+                    
+                    # Calculate category statistics
+                    categories_with_min = sum(1 for count in stats['category_coverage'].values() if count >= MIN_SAMPLES_PER_CATEGORY)
+                    categories_with_max = sum(1 for count in stats['category_coverage'].values() if count >= MAX_SAMPLES_PER_CATEGORY)
+                    avg_per_category = sum(stats['category_coverage'].values()) / len(stats['category_coverage']) if stats['category_coverage'] else 0
+                    
+                    # Estimate current size
+                    current_size_gb = stats['success'] * ESTIMATED_BYTES_PER_CLIP / 1024 / 1024 / 1024
+                    
+                    logging.info(
+                        f"  Progress: {progress_counter}/{len(segments_ordered)} "
+                        f"({stats['success']} OK, {stats['failed']} failed) "
+                        f"- Size: {current_size_gb:.1f}GB/{TARGET_DATASET_SIZE_GB}GB "
+                        f"- Categories: {categories_with_min}/{stats['categories']} with {MIN_SAMPLES_PER_CATEGORY}+, "
+                        f"{categories_with_max} at max ({MAX_SAMPLES_PER_CATEGORY}), "
+                        f"avg {avg_per_category:.1f} per category "
+                        f"- ETA: {timedelta(seconds=int(remaining))}"
+                    )
     
     # Final stats with category coverage
     elapsed = time.time() - start_time_overall

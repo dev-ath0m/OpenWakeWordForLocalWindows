@@ -308,7 +308,7 @@ if (-not (Test-Path $mitEnvPath)) {
 $mitEnvCount = (Get-ChildItem -Path $mitEnvPath -Filter "*.wav" -ErrorAction SilentlyContinue | Measure-Object).Count
 if ($mitEnvCount -lt 250) {
     Write-Host "  [!] MIT Environmental - missing or incomplete ($mitEnvCount files)" -ForegroundColor Yellow
-    $datasetsToDownload += "mit_environmental"
+    Write-Host "      (Will be offered during training - requires Python environment)" -ForegroundColor Gray
 } else {
     Write-Host "  [OK] MIT Environmental - $mitEnvCount files" -ForegroundColor Green
 }
@@ -378,15 +378,7 @@ if ($datasetsToDownload.Count -gt 0) {
                 Write-Host "    You can download manually from: https://mcdermottlab.mit.edu/Reverb/IR_Survey.html" -ForegroundColor Yellow
             }
         }
-                # Download MIT Environmental (from HuggingFace - matches original Colab)
-        if ($datasetsToDownload -contains "mit_environmental") {
-            Write-Host "`n  MIT Environmental Impulse Responses (~300MB from HuggingFace)..." -ForegroundColor Cyan
-            Write-Host "    This dataset matches the original Colab training notebook" -ForegroundColor Gray
-            Write-Host "    Requires Python 'datasets' package - will be downloaded during training" -ForegroundColor Gray
-            Write-Host "    You can also download it manually by running:" -ForegroundColor Gray
-            Write-Host "      python -c `"import datasets; ds=datasets.load_dataset('davidscripka/MIT_environmental_impulse_responses', split='train'); [...]`"" -ForegroundColor DarkGray
-            Write-Host "    [INFO] Will be offered during training script" -ForegroundColor Yellow
-        }
+
                 # Download FMA small (larger download, ~7.2GB)
         if ($datasetsToDownload -contains "fma") {
             Write-Host "`n  FMA (Free Music Archive) download options:" -ForegroundColor Cyan
