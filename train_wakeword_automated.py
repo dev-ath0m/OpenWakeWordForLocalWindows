@@ -608,6 +608,14 @@ def clone_openwakeword(base_dir: Path) -> bool:
         print_warning("Failed to patch train.py - Piper will be required")
         print_warning("Training may fail if Piper is not available")
     
+    # Patch utils.py for Windows compatibility
+    if not patch_openwakeword_utils(openwakeword_dir):
+        print_warning("Failed to patch utils.py - may have file permission errors on Windows")
+    
+    # Patch data.py for Windows compatibility
+    if not patch_openwakeword_data(openwakeword_dir):
+        print_warning("Failed to patch data.py - may have file permission errors on Windows")
+    
     return True
 
 def patch_openwakeword_train_script(openwakeword_dir: Path) -> bool:
@@ -699,6 +707,114 @@ def patch_openwakeword_train_script(openwakeword_dir: Path) -> bool:
         import traceback
         traceback.print_exc()
         return False
+
+
+def patch_openwakeword_utils(openwakeword_dir: Path) -> bool:
+    """Patch OpenWakeWord's utils.py to fix Windows file permission errors"""
+    utils_script = openwakeword_dir / "openwakeword" / "utils.py"
+    
+    if not utils_script.exists():
+        print_error(f"utils.py not found at {utils_script}")
+        return False
+    
+    print_info("Patching utils.py for Windows compatibility...")
+    
+    try:
+        content = utils_script.read_text(encoding='utf-8')
+        original_content = content
+        
+        # Patch: Close memory-mapped file before trimming (Windows requires this)
+        # Find the line: "    # Trip empty rows from the mmapped array"
+        # Add cleanup before trim_mmap call
+        pattern = r'(\s+fp\.flush\(\)\s+)(# Trip empty rows from the mmapped array\s+trim_mmap\(output_file\))'
+        replacement = r'''\1# Close memory-mapped file before trimming (Windows requires this)
+    del fp
+    import gc
+    gc.collect()
+    
+    \2'''
+        
+        content = content.replace(
+            '    fp.flush()\n\n    # Trip empty rows from the mmapped array\n    trim_mmap(output_file)',
+            '''    fp.flush()
+
+    # Close memory-mapped file before trimming (Windows requires this)
+    del fp
+    import gc
+    gc.collect()
+    
+    # Trip empty rows from the mmapped array
+    trim_mmap(output_file)'''
+        )
+        
+        if content == original_content:
+            print_warning("No changes made - utils.py may already be patched or format has changed")
+            return True
+        
+        utils_script.write_text(content, encoding='utf-8')
+        print_success("utils.py patched successfully - Windows file handling fixed")
+        return True
+        
+    except Exception as e:
+        print_error(f"Patching utils.py failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def patch_openwakeword_data(openwakeword_dir: Path) -> bool:
+    """Patch OpenWakeWord's data.py to fix Windows file permission errors"""
+    data_script = openwakeword_dir / "openwakeword" / "data.py"
+    
+    if not data_script.exists():
+        print_error(f"data.py not found at {data_script}")
+        return False
+    
+    print_info("Patching data.py for Windows compatibility...")
+    
+    try:
+        content = data_script.read_text(encoding='utf-8')
+        original_content = content
+        
+        # Patch: Close memory-mapped files before deleting (Windows requires this)
+        # Find the section in trim_mmap function where files are removed
+        pattern = r'(\s+mmap_file2\.flush\(\)\s+)(# Remove old mmaped file\s+os\.remove\(mmap_path\))'
+        replacement = r'''\1# Close memory-mapped files before deleting (Windows requires this)
+    del mmap_file1
+    del mmap_file2
+    import gc
+    gc.collect()
+    
+    \2'''
+        
+        content = content.replace(
+            '            mmap_file2.flush()\n\n    # Remove old mmaped file\n    os.remove(mmap_path)',
+            '''            mmap_file2.flush()
+
+    # Close memory-mapped files before deleting (Windows requires this)
+    del mmap_file1
+    del mmap_file2
+    import gc
+    gc.collect()
+    
+    # Remove old mmaped file
+    os.remove(mmap_path)'''
+        )
+        
+        if content == original_content:
+            print_warning("No changes made - data.py may already be patched or format has changed")
+            return True
+        
+        data_script.write_text(content, encoding='utf-8')
+        print_success("data.py patched successfully - Windows file handling fixed")
+        return True
+        
+    except Exception as e:
+        print_error(f"Patching data.py failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
 
 def install_dependencies() -> bool:
     """Install missing dependencies"""
