@@ -1198,48 +1198,6 @@ class _SuppressOutput:
             self.log_file.close()
 
 
-def _process_audio_sample(audio_file: Path, target_sr: int = 16000, max_duration: float = 4.0) -> bool:
-    """
-    Process audio sample: validate, trim silence, and resample to 16kHz
-    
-    Returns:
-        True if processing successful, False if sample should be discarded
-    """
-    try:
-        from scipy.io import wavfile
-        import librosa
-        import numpy as np
-        
-        sr, audio = wavfile.read(str(audio_file))
-        
-        # Skip if too long
-        if len(audio) / sr > max_duration:
-            audio_file.unlink()
-            return False
-        
-        # Trim silence
-        audio_float = audio.astype(np.float32)
-        audio_trimmed, _ = librosa.effects.trim(audio_float, top_db=30)
-        
-        # Resample to target sample rate if needed
-        if sr != target_sr:
-            from scipy import signal
-            num_samples = int(len(audio_trimmed) * target_sr / sr)
-            audio_resampled = signal.resample(audio_trimmed, num_samples)
-            audio = audio_resampled.astype(np.int16)
-        else:
-            audio = audio_trimmed.astype(np.int16)
-        
-        # Save processed audio
-        wavfile.write(str(audio_file), target_sr, audio)
-        return True
-        
-    except Exception:
-        if audio_file.exists():
-            audio_file.unlink()
-        return False
-
-
 def _get_process_usage():
     """Get current process CPU and GPU usage for progress monitoring"""
     try:
@@ -1436,13 +1394,26 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                 
                 print_success(f"Model {model_short} loaded successfully on {device.upper()}")
                 
-                # Flag to track first generation (warmup)
-                first_generation = True
+                # Get the synthesizer's native sample rate for efficient resampling
+                try:
+                    if hasattr(tts, 'synthesizer') and hasattr(tts.synthesizer, 'output_sample_rate'):
+                        native_sr = tts.synthesizer.output_sample_rate
+                    else:
+                        native_sr = 22050  # Default for most TTS models
+                except:
+                    native_sr = 22050
                 
                 print_info(f"Starting generation with {len(pronunciations)} pronunciation(s)...")
+                print_info(f"Native TTS sample rate: {native_sr}Hz → Resampling to 16kHz")
                 
                 # Initialize tqdm progress bar
                 from tqdm import tqdm
+                import librosa
+                import soundfile as sf
+                
+                # Pre-create resampler for performance (if resampling needed)
+                need_resample = (native_sr != 16000)
+                
                 gender = model_config.get("gender", "voice")
                 speaker = model_config.get("speaker", "")
                 speaker_suffix = f"_{speaker}_{gender}" if speaker else f"_{gender}"
@@ -1451,6 +1422,9 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                 pbar = tqdm(total=total_target, desc=f"Positive ({model_desc})", 
                            unit="samples", initial=0,
                            bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]')
+                
+                # Progress update frequency (update every N samples to reduce overhead)
+                progress_update_interval = 10
                 
                 for variation in pronunciations:
                     # Generate training samples
@@ -1465,7 +1439,6 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                             
                             kwargs = {
                                 'text': variation,
-                                'file_path': str(output_file),
                                 'speed': speed
                             }
                             
@@ -1474,34 +1447,67 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                             if 'language' in model_config:
                                 kwargs['language'] = model_config['language']
                             
-                            # Generate sample with suppressed output
+                            # Generate directly to numpy array (in-memory, no temp file)
                             with _SuppressOutput():
-                                tts.tts_to_file(**kwargs)
+                                # Use tts_with_vc if available for in-memory synthesis
+                                if hasattr(tts, 'tts') and callable(tts.tts):
+                                    audio = tts.tts(**kwargs)
+                                else:
+                                    # Fallback to file-based if in-memory not supported
+                                    temp_file = output_file.parent / f"temp_{output_file.name}"
+                                    kwargs['file_path'] = str(temp_file)
+                                    tts.tts_to_file(**kwargs)
+                                    audio, _ = librosa.load(str(temp_file), sr=native_sr, mono=True)
+                                    temp_file.unlink()
                             
-                            # Process and validate audio
-                            if _process_audio_sample(output_file):
-                                train_count += 1
-                                model_train_count += 1
-                                combo_count += 1
-                            else:
+                            # Trim silence
+                            audio_trimmed, _ = librosa.effects.trim(audio, top_db=30)
+                            
+                            # Skip if too long
+                            if len(audio_trimmed) / native_sr > 4.0:
                                 failed_count += 1
                                 combo_count += 1
                                 continue
                             
-                            # Update progress bar with CPU/GPU usage
-                            cpu_usage, gpu_usage = _get_process_usage()
-                            text_display = variation[:30] + '...' if len(variation) > 30 else variation
-                            total_valid = train_count + test_count
-                            pbar.n = total_valid
-                            pbar.set_postfix({
-                                'Train': train_count,
-                                'Test': test_count,
-                                'Failed': failed_count,
-                                'CPU': f'{cpu_usage:.0f}%',
-                                'GPU': gpu_usage,
-                                'Text': text_display
-                            })
-                            pbar.refresh()
+                            # Resample to 16kHz only if needed
+                            if need_resample:
+                                audio_16k = librosa.resample(audio_trimmed, orig_sr=native_sr, target_sr=16000)
+                            else:
+                                audio_16k = audio_trimmed
+                            
+                            # Normalize
+                            if len(audio_16k) > 0:
+                                max_val = np.abs(audio_16k).max()
+                                if max_val > 0:
+                                    audio_16k = audio_16k / max_val * 0.95
+                            
+                            # Save directly as 16kHz PCM_16
+                            sf.write(str(output_file), audio_16k, 16000, subtype='PCM_16')
+                            
+                            train_count += 1
+                            model_train_count += 1
+                            combo_count += 1
+                            
+                            # Update progress only every N samples to reduce overhead
+                            if train_count % progress_update_interval == 0:
+                                cpu_usage, gpu_usage = _get_process_usage()
+                                text_display = variation[:30] + '...' if len(variation) > 30 else variation
+                                total_valid = train_count + test_count
+                                pbar.n = total_valid
+                                pbar.set_postfix({
+                                    'Train': train_count,
+                                    'Test': test_count,
+                                    'Failed': failed_count,
+                                    'CPU': f'{cpu_usage:.0f}%',
+                                    'GPU': gpu_usage,
+                                    'Text': text_display
+                                })
+                                pbar.refresh()
+                            
+                        except Exception as e:
+                            failed_count += 1
+                            combo_count += 1
+                            continue
                                 
                         except Exception:
                             failed_count += 1
@@ -1516,6 +1522,7 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                     test_samples_per_combo = max(1, model_test_target // len(pronunciations))
                     while test_count < n_samples_val and combo_test_count < test_samples_per_combo and model_test_count < model_test_target:
                         output_file = positive_test_dir / f"{model_short}_test_{test_count}.wav"
+                        temp_file = output_file.parent / f"temp_{output_file.name}"
                         
                         try:
                             # Generate with speed variation
@@ -1523,7 +1530,7 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                             
                             kwargs = {
                                 'text': variation,
-                                'file_path': str(output_file),
+                                'file_path': str(temp_file),
                                 'speed': speed
                             }
                             
@@ -1536,15 +1543,41 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                             with _SuppressOutput():
                                 tts.tts_to_file(**kwargs)
                             
-                            # Process and validate audio
-                            if _process_audio_sample(output_file):
-                                test_count += 1
-                                model_test_count += 1
-                                combo_test_count += 1
-                            else:
+                            # Load, resample, trim, and save in one efficient step
+                            audio, sr = librosa.load(str(temp_file), sr=native_sr, mono=True)
+                            audio_trimmed, _ = librosa.effects.trim(audio, top_db=30)
+                            
+                            if len(audio_trimmed) / native_sr > 4.0:
+                                temp_file.unlink()
                                 failed_count += 1
                                 combo_test_count += 1
                                 continue
+                            
+                            if native_sr != 16000:
+                                audio_16k = librosa.resample(audio_trimmed, orig_sr=native_sr, target_sr=16000)
+                            else:
+                                audio_16k = audio_trimmed
+                            
+                            if len(audio_16k) > 0:
+                                max_val = np.abs(audio_16k).max()
+                                if max_val > 0:
+                                    audio_16k = audio_16k / max_val * 0.95
+                            
+                            sf.write(str(output_file), audio_16k, 16000, subtype='PCM_16')
+                            temp_file.unlink()
+                            
+                            test_count += 1
+                            model_test_count += 1
+                            combo_test_count += 1
+                            
+                        except Exception as e:
+                            failed_count += 1
+                            combo_test_count += 1
+                            if temp_file.exists():
+                                temp_file.unlink()
+                            if output_file.exists():
+                                output_file.unlink()
+                            continue
                             
                             # Update progress bar with CPU/GPU usage
                             cpu_usage, gpu_usage = _get_process_usage()
@@ -1760,8 +1793,20 @@ def _generate_negative_samples(wake_word: str, n_samples: int, n_samples_val: in
                 
                 print_success(f"Model {model_short} loaded successfully on {device.upper()}")
                 
+                # Get native sample rate
+                try:
+                    if hasattr(tts, 'synthesizer') and hasattr(tts.synthesizer, 'output_sample_rate'):
+                        native_sr = tts.synthesizer.output_sample_rate
+                    else:
+                        native_sr = 22050
+                except:
+                    native_sr = 22050
+                
                 # Initialize progress bar for this model
                 from tqdm import tqdm
+                import librosa
+                import soundfile as sf
+                
                 gender = model_config.get("gender", "voice")
                 speaker = model_config.get("speaker", "")
                 speaker_suffix = f"_{speaker}_{gender}" if speaker else f"_{gender}"
@@ -1780,15 +1825,15 @@ def _generate_negative_samples(wake_word: str, n_samples: int, n_samples_val: in
                         text_idx += 1
                         
                         output_file = negative_train_dir / f"neg_{train_count}.wav"
+                        temp_file = output_file.parent / f"temp_{output_file.name}"
                         
                         try:
-                            # Generate with speed variation (matching positive samples)
+                            # Generate with speed variation
                             speed = 1.0 + np.random.uniform(-0.1, 0.1)
                             
-                            # Build kwargs using model_config (same as positive samples)
                             kwargs = {
                                 'text': text,
-                                'file_path': str(output_file),
+                                'file_path': str(temp_file),
                                 'speed': speed
                             }
                             
@@ -1801,13 +1846,38 @@ def _generate_negative_samples(wake_word: str, n_samples: int, n_samples_val: in
                             with _SuppressOutput():
                                 tts.tts_to_file(**kwargs)
                             
-                            # Process and validate audio using shared helper
-                            if _process_audio_sample(output_file):
-                                train_count += 1
-                                model_train_count += 1
-                            else:
+                            # Load, resample, trim, and save
+                            audio, sr = librosa.load(str(temp_file), sr=native_sr, mono=True)
+                            audio_trimmed, _ = librosa.effects.trim(audio, top_db=30)
+                            
+                            if len(audio_trimmed) / native_sr > 4.0:
+                                temp_file.unlink()
                                 failed_count += 1
                                 continue
+                            
+                            if native_sr != 16000:
+                                audio_16k = librosa.resample(audio_trimmed, orig_sr=native_sr, target_sr=16000)
+                            else:
+                                audio_16k = audio_trimmed
+                            
+                            if len(audio_16k) > 0:
+                                max_val = np.abs(audio_16k).max()
+                                if max_val > 0:
+                                    audio_16k = audio_16k / max_val * 0.95
+                            
+                            sf.write(str(output_file), audio_16k, 16000, subtype='PCM_16')
+                            temp_file.unlink()
+                            
+                            train_count += 1
+                            model_train_count += 1
+                            
+                        except Exception as e:
+                            failed_count += 1
+                            if temp_file.exists():
+                                temp_file.unlink()
+                            if output_file.exists():
+                                output_file.unlink()
+                            continue
                             
                             # Update progress bar with CPU/GPU usage
                             cpu_usage, gpu_usage = _get_process_usage()
@@ -1838,15 +1908,15 @@ def _generate_negative_samples(wake_word: str, n_samples: int, n_samples_val: in
                         text_idx += 1
                         
                         output_file = negative_test_dir / f"neg_test_{test_count}.wav"
+                        temp_file = output_file.parent / f"temp_{output_file.name}"
                         
                         try:
-                            # Generate with speed variation (matching positive samples)
+                            # Generate with speed variation
                             speed = 1.0 + np.random.uniform(-0.1, 0.1)
                             
-                            # Build kwargs using model_config (same as positive samples)
                             kwargs = {
                                 'text': text,
-                                'file_path': str(output_file),
+                                'file_path': str(temp_file),
                                 'speed': speed
                             }
                             
@@ -1859,13 +1929,38 @@ def _generate_negative_samples(wake_word: str, n_samples: int, n_samples_val: in
                             with _SuppressOutput():
                                 tts.tts_to_file(**kwargs)
                             
-                            # Process and validate audio using shared helper
-                            if _process_audio_sample(output_file):
-                                test_count += 1
-                                model_test_count += 1
-                            else:
+                            # Load, resample, trim, and save
+                            audio, sr = librosa.load(str(temp_file), sr=native_sr, mono=True)
+                            audio_trimmed, _ = librosa.effects.trim(audio, top_db=30)
+                            
+                            if len(audio_trimmed) / native_sr > 4.0:
+                                temp_file.unlink()
                                 failed_count += 1
                                 continue
+                            
+                            if native_sr != 16000:
+                                audio_16k = librosa.resample(audio_trimmed, orig_sr=native_sr, target_sr=16000)
+                            else:
+                                audio_16k = audio_trimmed
+                            
+                            if len(audio_16k) > 0:
+                                max_val = np.abs(audio_16k).max()
+                                if max_val > 0:
+                                    audio_16k = audio_16k / max_val * 0.95
+                            
+                            sf.write(str(output_file), audio_16k, 16000, subtype='PCM_16')
+                            temp_file.unlink()
+                            
+                            test_count += 1
+                            model_test_count += 1
+                            
+                        except Exception as e:
+                            failed_count += 1
+                            if temp_file.exists():
+                                temp_file.unlink()
+                            if output_file.exists():
+                                output_file.unlink()
+                            continue
                             
                             # Update progress bar with CPU/GPU usage
                             cpu_usage, gpu_usage = _get_process_usage()
