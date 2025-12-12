@@ -12,7 +12,7 @@ deep-phonemizer==0.0.19
 
 # ===== System Monitoring (for progress bars) =====
 psutil
-pynvml  # NVIDIA GPU monitoring
+nvidia-ml-py  # NVIDIA GPU monitoring (replaces deprecated pynvml)
 
 # ===== PyTorch (CUDA) =====
 # Compatible versions for TTS 0.21.3 - install with CUDA 12.4 support
