@@ -2169,8 +2169,8 @@ def check_and_fix_audio_sample_rates(config: dict, remove_corrupted: bool = True
         if get_yes_no("Continue with training anyway?", default=False):
             return True
         else:
-            print_info("Exiting...")
-            return False
+            print_info("Exiting training setup...")
+            sys.exit(0)  # Exit directly instead of returning False
 
 def export_to_onnx(model_dir: Path, model_name: str) -> Optional[Path]:
     """Export model to ONNX format"""
