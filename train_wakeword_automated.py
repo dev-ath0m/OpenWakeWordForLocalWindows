@@ -1155,20 +1155,36 @@ def _setup_tts_environment(base_dir: Path):
 
 
 class _SuppressOutput:
-    """Context manager to suppress stdout/stderr during TTS generation"""
+    """Context manager to redirect stdout/stderr to log file during TTS operations"""
+    def __init__(self, log_file_path=None):
+        self.log_file_path = log_file_path
+        
     def __enter__(self):
-        import sys as _sys
-        import io
-        self._original_stdout = _sys.stdout
-        self._original_stderr = _sys.stderr
-        _sys.stdout = io.StringIO()
-        _sys.stderr = io.StringIO()
+        import sys
+        self._original_stdout = sys.stdout
+        self._original_stderr = sys.stderr
+        
+        if self.log_file_path:
+            # Open log file and redirect Python-level streams only
+            self.log_file = open(self.log_file_path, 'a', encoding='utf-8', buffering=1)
+            sys.stdout = self.log_file
+            sys.stderr = self.log_file
+        else:
+            import io
+            sys.stdout = io.StringIO()
+            sys.stderr = io.StringIO()
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb):
-        import sys as _sys
-        _sys.stdout = self._original_stdout
-        _sys.stderr = self._original_stderr
+        import sys
+        
+        # Restore original streams
+        sys.stdout = self._original_stdout
+        sys.stderr = self._original_stderr
+        
+        # Close log file if it was opened
+        if self.log_file_path and hasattr(self, 'log_file'):
+            self.log_file.close()
 
 
 def _process_audio_sample(audio_file: Path, target_sr: int = 16000, max_duration: float = 4.0) -> bool:
@@ -1252,8 +1268,18 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                 import logging
                 import threading
                 import time as time_module
+                import sys
+                import os
                 
-                logging.getLogger('TTS').setLevel(logging.WARNING)
+                logging.getLogger('TTS').setLevel(logging.CRITICAL)
+                
+                # Setup TTS log file for redirecting verbose output
+                tts_log_path = base_dir / "tts_output.log"
+                
+                # Fix PyTorch 2.6 weights_only issue for TTS models
+                import torch
+                from TTS.utils.radam import RAdam
+                torch.serialization.add_safe_globals([RAdam])
                 
                 # Spinner for model loading
                 loading_done = threading.Event()
@@ -1275,9 +1301,20 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                 spinner_thread.daemon = True
                 spinner_thread.start()
                 
-                tts = TTS(model_name=model_path)
+                # Stop spinner before redirecting output
                 loading_done.set()
                 spinner_thread.join(timeout=0.5)
+                
+                # Load TTS model with output redirected to log
+                try:
+                    with _SuppressOutput(log_file_path=tts_log_path):
+                        tts = TTS(model_name=model_path)
+                    print_success(f"Model {model_short} initialized")
+                except Exception as e:
+                    print_error(f"Failed to initialize TTS model: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    raise
                 
                 # Start spinner for GPU transfer
                 loading_done.clear()
@@ -1285,28 +1322,25 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                 spinner_thread.daemon = True
                 spinner_thread.start()
                 
-                tts = tts.to(device)
+                # Stop spinner before redirecting output
                 loading_done.set()
                 spinner_thread.join(timeout=0.5)
                 
-                print("\n[DEBUG] About to set logging level...")
-                import sys
-                sys.stdout.flush()
-                
-                logging.getLogger('TTS').setLevel(logging.CRITICAL)
-                
-                print("[DEBUG] Logging level set, printing success message...")
-                sys.stdout.flush()
+                # Transfer to GPU with output redirected to log
+                with _SuppressOutput(log_file_path=tts_log_path):
+                    tts = tts.to(device)
                 
                 print_success(f"Model {model_short} loaded successfully")
-                
-                print(f"[DEBUG] Success printed. Pronunciations: {pronunciations}")
-                sys.stdout.flush()
                 
                 # Flag to track first generation (warmup)
                 first_generation = True
                 
                 print_info(f"Starting generation with {len(pronunciations)} pronunciation(s)...")
+                
+                # Initialize tqdm progress bar
+                from tqdm import tqdm
+                pbar = tqdm(total=n_samples, desc=f"Generating {model_short}", 
+                           unit="samples", bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]')
                 
                 for variation in pronunciations:
                     # Create subfolder for this model/variation
@@ -1361,7 +1395,7 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                             
                             # Generate sample with suppressed output
                             try:
-                                with _SuppressOutput():
+                                with _SuppressOutput(log_file_path=tts_log_path):
                                     tts.tts_to_file(**kwargs)
                             except Exception as gen_error:
                                 # Log generation errors for debugging
@@ -1383,24 +1417,17 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                                 combo_count += 1
                                 continue
                             
-                            # Show progress bar
-                            progress_pct = (valid_count / n_samples) * 100
+                            # Update progress bar with tqdm
                             total_attempts = valid_count + failed_count
                             fail_pct = (failed_count / total_attempts * 100) if total_attempts > 0 else 0
-                            
-                            bar_width = 50
-                            filled = int(bar_width * valid_count / n_samples)
-                            bar = '█' * filled + '░' * (bar_width - filled)
-                            
                             var_display = variation if len(variation) <= 20 else variation[:17] + '...'
                             
-                            # Use ANSI escape codes for better terminal compatibility
-                            import sys
-                            # Move to start of line, clear line, write progress
-                            progress_line = f"[{bar}] {progress_pct:5.1f}% | {valid_count}/{n_samples} valid | Failed: {fail_pct:4.1f}% | Current: '{var_display}' ({model_short})"
-                            # \033[2K clears entire line, \r returns to start
-                            sys.stdout.write(f"\033[2K\r{Colors.OKCYAN}{progress_line}{Colors.ENDC}")
-                            sys.stdout.flush()
+                            pbar.n = valid_count
+                            pbar.set_postfix({
+                                'Failed': f'{fail_pct:.1f}%',
+                                'Current': f"'{var_display}' ({model_short})"
+                            })
+                            pbar.refresh()
                                 
                         except Exception:
                             failed_count += 1
@@ -1412,13 +1439,17 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                     if valid_count >= n_samples:
                         break
                 
-                # Print newline after progress bar
-                print()
+                # Close progress bar
+                pbar.close()
+                
                 total_attempts = valid_count + failed_count
                 fail_pct = (failed_count / total_attempts * 100) if total_attempts > 0 else 0
                 print_success(f"Completed model '{model_short}': {valid_count} valid samples, {failed_count} failed ({fail_pct:.1f}%)")
                         
             except Exception as e:
+                # Close progress bar on error if it exists
+                if 'pbar' in locals():
+                    pbar.close()
                 print_warning(f"Model {model_short} failed: {e}")
                 continue
             
