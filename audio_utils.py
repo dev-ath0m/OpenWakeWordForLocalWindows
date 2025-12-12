@@ -131,6 +131,7 @@ def scan_and_convert_audio_files(
     files_to_convert = []
     corrupted_files = []
     scanned = 0
+    pbar = None
     
     try:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -158,20 +159,22 @@ def scan_and_convert_audio_files(
                             failed_pct = (len(corrupted_files) / scanned * 100) if scanned > 0 else 0
                             pbar.set_postfix({'Failed': f'{len(corrupted_files)} ({failed_pct:.1f}%)'})
                         pbar.update(1)
-                        pbar.refresh()  # Force refresh
             except KeyboardInterrupt:
-                if show_progress:
+                if show_progress and pbar:
                     pbar.close()
-                    print("\n[INTERRUPTED] Cancelling audio file scanning...")
-                # Cancel remaining futures
+                print("\n[INTERRUPTED] Cancelling audio file scanning...")
+                # Cancel remaining futures and shutdown executor quickly
                 for future in futures:
                     future.cancel()
+                executor.shutdown(wait=False, cancel_futures=True)
                 raise
-            finally:
-                if show_progress:
-                    pbar.close()
     except KeyboardInterrupt:
+        if show_progress and pbar and not pbar.disable:
+            pbar.close()
         raise
+    finally:
+        if show_progress and pbar and not pbar.disable:
+            pbar.close()
     
     # Report scan results
     if show_progress:
@@ -195,6 +198,7 @@ def scan_and_convert_audio_files(
     # Phase 2: Parallel conversion
     converted = 0
     conversion_errors = []
+    pbar2 = None
     
     if files_to_convert:
         if show_progress:
@@ -205,7 +209,7 @@ def scan_and_convert_audio_files(
                 futures = {executor.submit(resample_audio_file, (f, target_sr)): f for f, _ in files_to_convert}
                 
                 if show_progress:
-                    pbar = tqdm(total=len(files_to_convert), desc="Converting", unit="files",
+                    pbar2 = tqdm(total=len(files_to_convert), desc="Converting", unit="files",
                                file=sys.stdout, mininterval=0.5, dynamic_ncols=True)
                 
                 try:
@@ -218,21 +222,23 @@ def scan_and_convert_audio_files(
                             conversion_errors.append((file_path, status))
                         
                         if show_progress:
-                            pbar.update(1)
-                            pbar.refresh()  # Force refresh
+                            pbar2.update(1)
                 except KeyboardInterrupt:
-                    if show_progress:
-                        pbar.close()
-                        print("\n[INTERRUPTED] Cancelling audio file conversion...")
-                    # Cancel remaining futures
+                    if show_progress and pbar2:
+                        pbar2.close()
+                    print("\n[INTERRUPTED] Cancelling audio file conversion...")
+                    # Cancel remaining futures and shutdown quickly
                     for future in futures:
                         future.cancel()
+                    executor.shutdown(wait=False, cancel_futures=True)
                     raise
-                finally:
-                    if show_progress:
-                        pbar.close()
         except KeyboardInterrupt:
+            if show_progress and pbar2 and not pbar2.disable:
+                pbar2.close()
             raise
+        finally:
+            if show_progress and pbar2 and not pbar2.disable:
+                pbar2.close()
     
     # Handle conversion errors
     removed_failed = 0
