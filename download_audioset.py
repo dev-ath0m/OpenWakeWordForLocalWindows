@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+from tqdm import tqdm
 
 # Setup logging
 logging.basicConfig(
@@ -421,6 +422,13 @@ def download_from_csv(csv_path, output_dir, subset_name, class_labels=None, limi
     
     # Parallel download with thread pool
     logging.info(f"Starting parallel download with {MAX_WORKERS} workers...")
+    
+    # Create progress bar
+    pbar = tqdm(total=len(segments_ordered), 
+                desc=f"Downloading {subset_name}",
+                unit="clips",
+                bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]')
+    
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         # Submit all tasks
         future_to_segment = {
@@ -440,30 +448,22 @@ def download_from_csv(csv_path, output_dir, subset_name, class_labels=None, limi
                 with stats_lock:
                     stats['failed'] += 1
             
-            # Progress update every 10 files
-            if progress_counter % 10 == 0:
-                with stats_lock:
-                    elapsed = time.time() - start_time_overall
-                    rate = progress_counter / elapsed if elapsed > 0 else 0
-                    remaining = (len(segments_ordered) - progress_counter) / rate if rate > 0 else 0
-                    
-                    # Calculate category statistics
-                    categories_with_min = sum(1 for count in stats['category_coverage'].values() if count >= MIN_SAMPLES_PER_CATEGORY)
-                    categories_with_max = sum(1 for count in stats['category_coverage'].values() if count >= MAX_SAMPLES_PER_CATEGORY)
-                    avg_per_category = sum(stats['category_coverage'].values()) / len(stats['category_coverage']) if stats['category_coverage'] else 0
-                    
-                    # Estimate current size
-                    current_size_gb = stats['success'] * ESTIMATED_BYTES_PER_CLIP / 1024 / 1024 / 1024
-                    
-                    logging.info(
-                        f"  Progress: {progress_counter}/{len(segments_ordered)} "
-                        f"({stats['success']} OK, {stats['failed']} failed) "
-                        f"- Size: {current_size_gb:.1f}GB/{TARGET_DATASET_SIZE_GB}GB "
-                        f"- Categories: {categories_with_min}/{stats['categories']} with {MIN_SAMPLES_PER_CATEGORY}+, "
-                        f"{categories_with_max} at max ({MAX_SAMPLES_PER_CATEGORY}), "
-                        f"avg {avg_per_category:.1f} per category "
-                        f"- ETA: {timedelta(seconds=int(remaining))}"
-                    )
+            # Update progress bar
+            with stats_lock:
+                # Calculate current statistics
+                current_size_gb = stats['success'] * ESTIMATED_BYTES_PER_CLIP / 1024 / 1024 / 1024
+                categories_with_min = sum(1 for count in stats['category_coverage'].values() if count >= MIN_SAMPLES_PER_CATEGORY)
+                
+                # Update progress bar with postfix info
+                pbar.set_postfix({
+                    'OK': stats['success'],
+                    'Failed': stats['failed'],
+                    'Size': f"{current_size_gb:.1f}/{TARGET_DATASET_SIZE_GB}GB",
+                    'Categories': f"{categories_with_min}/{stats['categories']} with {MIN_SAMPLES_PER_CATEGORY}+"
+                })
+                pbar.update(1)
+    
+    pbar.close()
     
     # Final stats with category coverage
     elapsed = time.time() - start_time_overall
