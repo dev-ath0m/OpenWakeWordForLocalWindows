@@ -2165,12 +2165,9 @@ def check_and_fix_audio_sample_rates(config: dict, remove_corrupted: bool = True
         return True
     except KeyboardInterrupt:
         print_warning("\n\nAudio conversion interrupted by user")
-        print_info("Some files may not have been processed")
-        if get_yes_no("Continue with training anyway?", default=False):
-            return True
-        else:
-            print_info("Exiting training setup...")
-            sys.exit(0)  # Exit directly instead of returning False
+        print_info("Training cannot continue without proper audio file conversion")
+        print_info("Please run the script again when ready")
+        sys.exit(0)
 
 def export_to_onnx(model_dir: Path, model_name: str) -> Optional[Path]:
     """Export model to ONNX format"""
@@ -2350,34 +2347,52 @@ def main():
         print_warning(f"Note: You have {audioset_count} samples. More samples = better quality model")
         print()
         
-        if get_yes_no("Download additional AudioSet samples now?", default=False):
+        # Calculate how many samples needed to reach 1000
+        samples_needed = max(0, 1000 - audioset_count)
+        print_info(f"To reach 1000 samples, you need {samples_needed} more files")
+        print()
+        
+        # Ask user how many samples to download
+        download_count = get_user_input(
+            f"How many additional samples to download? (0 to skip, recommended: {samples_needed}+)",
+            default="0",
+            input_type=int
+        )
+        
+        if download_count > 0:
             # Check if download_audioset.py exists
             download_script = Path("download_audioset.py")
             if not download_script.exists():
                 print_error("download_audioset.py not found in workspace")
                 print_info("You can download it from the OpenWakeWord repository")
             else:
-                print_info("\nStarting AudioSet download...")
+                print_info(f"\nStarting AudioSet download ({download_count} samples)...")
                 print_warning("This will take several hours. You can stop with Ctrl+C and resume later.")
                 print()
                 
-                # Run download script
+                # Run download script with sample count
                 import subprocess
                 try:
+                    # Pass the number of samples as argument
                     result = subprocess.run(
-                        [sys.executable, str(download_script), str(audioset_path)],
+                        [sys.executable, str(download_script), str(audioset_path), "--max-samples", str(download_count)],
                         check=False
                     )
                     
                     if result.returncode == 0:
                         new_count = len(list(audioset_path.rglob("*.wav")))
-                        print_success(f"AudioSet download complete: {new_count} files total")
+                        downloaded = new_count - audioset_count
+                        print_success(f"AudioSet download complete: {downloaded} new files ({new_count} total)")
                     else:
                         print_warning("AudioSet download incomplete or failed")
                         print_info("Continuing with existing samples")
                         
                 except KeyboardInterrupt:
                     print_warning("\nAudioSet download interrupted")
+                    new_count = len(list(audioset_path.rglob("*.wav")))
+                    if new_count > audioset_count:
+                        downloaded = new_count - audioset_count
+                        print_info(f"Partial download: {downloaded} new files ({new_count} total)")
                     print_info("Continuing with existing samples")
                 except Exception as e:
                     print_error(f"Failed to run AudioSet download: {e}")
