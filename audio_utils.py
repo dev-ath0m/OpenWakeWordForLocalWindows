@@ -189,25 +189,37 @@ def scan_and_convert_audio_files(
         if show_progress:
             print(f"Converting {len(files_to_convert)} files to {target_sr} Hz...")
         
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(resample_audio_file, (f, target_sr)): f for f, _ in files_to_convert}
-            
-            if show_progress:
-                pbar = tqdm(total=len(files_to_convert), desc="Converting", unit="files")
-            
-            for future in as_completed(futures):
-                file_path, original_sr, status = future.result()
-                
-                if status == 'converted':
-                    converted += 1
-                elif status.startswith('error'):
-                    conversion_errors.append((file_path, status))
+        try:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(resample_audio_file, (f, target_sr)): f for f, _ in files_to_convert}
                 
                 if show_progress:
-                    pbar.update(1)
-            
-            if show_progress:
-                pbar.close()
+                    pbar = tqdm(total=len(files_to_convert), desc="Converting", unit="files")
+                
+                try:
+                    for future in as_completed(futures):
+                        file_path, original_sr, status = future.result()
+                        
+                        if status == 'converted':
+                            converted += 1
+                        elif status.startswith('error'):
+                            conversion_errors.append((file_path, status))
+                        
+                        if show_progress:
+                            pbar.update(1)
+                except KeyboardInterrupt:
+                    if show_progress:
+                        pbar.close()
+                        print("\n[INTERRUPTED] Cancelling audio file conversion...")
+                    # Cancel remaining futures
+                    for future in futures:
+                        future.cancel()
+                    raise
+                finally:
+                    if show_progress:
+                        pbar.close()
+        except KeyboardInterrupt:
+            raise
     
     # Handle conversion errors
     removed_failed = 0

@@ -2144,24 +2144,33 @@ def check_and_fix_audio_sample_rates(config: dict, remove_corrupted: bool = True
     
     print_info(f"Found {len(all_audio_paths)} audio files to check")
     
-    # Use shared utility for scanning and conversion
-    results = scan_and_convert_audio_files(
-        audio_files=all_audio_paths,
-        target_sr=target_sr,
-        max_workers=None,  # Auto-detect optimal workers
-        remove_corrupted=remove_corrupted,
-        show_progress=True
-    )
-    
-    # Report results
-    print_success(f"Processed {results['total']} files:")
-    print_info(f"  - Already correct: {results['already_correct']}")
-    print_info(f"  - Converted: {results['converted']}")
-    if results['corrupted'] > 0:
-        status = "removed" if remove_corrupted else "found"
-        print_warning(f"  - Corrupted ({status}): {results['corrupted']}")
-    
-    return True
+    try:
+        # Use shared utility for scanning and conversion
+        results = scan_and_convert_audio_files(
+            audio_files=all_audio_paths,
+            target_sr=target_sr,
+            max_workers=None,  # Auto-detect optimal workers
+            remove_corrupted=remove_corrupted,
+            show_progress=True
+        )
+        
+        # Report results
+        print_success(f"Processed {results['total']} files:")
+        print_info(f"  - Already correct: {results['already_correct']}")
+        print_info(f"  - Converted: {results['converted']}")
+        if results['corrupted'] > 0:
+            status = "removed" if remove_corrupted else "found"
+            print_warning(f"  - Corrupted ({status}): {results['corrupted']}")
+        
+        return True
+    except KeyboardInterrupt:
+        print_warning("\n\nAudio conversion interrupted by user")
+        print_info("Some files may not have been processed")
+        if get_yes_no("Continue with training anyway?", default=False):
+            return True
+        else:
+            print_info("Exiting...")
+            return False
 
 def export_to_onnx(model_dir: Path, model_name: str) -> Optional[Path]:
     """Export model to ONNX format"""
