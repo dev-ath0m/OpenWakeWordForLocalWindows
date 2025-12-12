@@ -1250,10 +1250,52 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
             try:
                 # Load model (allow auto-download)
                 import logging
+                import threading
+                import time as time_module
+                
                 logging.getLogger('TTS').setLevel(logging.WARNING)
-                tts = TTS(model_name=model_path).to(device)
+                
+                # Spinner for model loading
+                loading_done = threading.Event()
+                def spinner(message):
+                    spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+                    idx = 0
+                    start_time = time_module.time()
+                    while not loading_done.is_set():
+                        elapsed = time_module.time() - start_time
+                        print(f"\r{Colors.OKCYAN}  {spinner_chars[idx]} {message} (elapsed: {int(elapsed)}s){Colors.ENDC}", 
+                              end='', flush=True)
+                        idx = (idx + 1) % len(spinner_chars)
+                        time_module.sleep(0.1)
+                    # Clear spinner line
+                    print("\r" + " " * 80 + "\r", end='', flush=True)
+                
+                # Start spinner for initialization
+                spinner_thread = threading.Thread(target=spinner, args=("Initializing TTS model...",))
+                spinner_thread.daemon = True
+                spinner_thread.start()
+                
+                tts = TTS(model_name=model_path)
+                loading_done.set()
+                spinner_thread.join(timeout=0.5)
+                
+                # Start spinner for GPU transfer
+                loading_done.clear()
+                spinner_thread = threading.Thread(target=spinner, args=(f"Moving model to {device.upper()}...",))
+                spinner_thread.daemon = True
+                spinner_thread.start()
+                
+                tts = tts.to(device)
+                loading_done.set()
+                spinner_thread.join(timeout=0.5)
+                
                 logging.getLogger('TTS').setLevel(logging.CRITICAL)
                 print_success(f"Model {model_short} loaded successfully")
+                
+                # Flag to track first generation (warmup)
+                first_generation = True
+                
+                print_info(f"Starting generation with {len(pronunciations)} pronunciation(s)...")
                 
                 for variation in pronunciations:
                     # Create subfolder for this model/variation
@@ -1269,6 +1311,29 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                         output_file = subfolder / f"{model_name}_{valid_count}.wav"
                         
                         try:
+                            # Show warmup message on first generation
+                            if first_generation:
+                                print_info(f"Preparing first generation for '{variation}'...")
+                                # Start warmup spinner
+                                warmup_done = threading.Event()
+                                def warmup_spinner():
+                                    spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+                                    idx = 0
+                                    start_time = time_module.time()
+                                    while not warmup_done.is_set():
+                                        elapsed = time_module.time() - start_time
+                                        print(f"\r{Colors.OKCYAN}  {spinner_chars[idx]} Warming up model (first generation)... (elapsed: {int(elapsed)}s){Colors.ENDC}", 
+                                              end='', flush=True)
+                                        idx = (idx + 1) % len(spinner_chars)
+                                        time_module.sleep(0.1)
+                                    # Clear spinner line
+                                    print("\r" + " " * 80 + "\r", end='', flush=True)
+                                
+                                warmup_thread = threading.Thread(target=warmup_spinner)
+                                warmup_thread.daemon = True
+                                warmup_thread.start()
+                                first_generation = False
+                            
                             # Generate with speed variation
                             speed = 1.0 + np.random.uniform(-0.1, 0.1)
                             
@@ -1284,8 +1349,19 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                                 kwargs['language'] = model_config['language']
                             
                             # Generate sample with suppressed output
-                            with _SuppressOutput():
-                                tts.tts_to_file(**kwargs)
+                            try:
+                                with _SuppressOutput():
+                                    tts.tts_to_file(**kwargs)
+                            except Exception as gen_error:
+                                # Log generation errors for debugging
+                                import logging as log
+                                log.warning(f"TTS generation error for '{variation}': {gen_error}")
+                                raise
+                            finally:
+                                # Stop warmup spinner if it was running
+                                if 'warmup_done' in locals():
+                                    warmup_done.set()
+                                    warmup_thread.join(timeout=0.5)
                             
                             # Process and validate audio
                             if _process_audio_sample(output_file):
@@ -1307,9 +1383,12 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                             
                             var_display = variation if len(variation) <= 20 else variation[:17] + '...'
                             
-                            print(f"\r{Colors.OKCYAN}[{bar}] {progress_pct:5.1f}% | {valid_count}/{n_samples} valid | "
-                                  f"Failed: {fail_pct:4.1f}% | Current: '{var_display}' ({model_short}){Colors.ENDC}", 
-                                  end='', flush=True)
+                            # Clear line first, then print progress (Windows PowerShell compatibility)
+                            import sys
+                            sys.stdout.write('\r' + ' ' * 120 + '\r')
+                            sys.stdout.write(f"{Colors.OKCYAN}[{bar}] {progress_pct:5.1f}% | {valid_count}/{n_samples} valid | "
+                                           f"Failed: {fail_pct:4.1f}% | Current: '{var_display}' ({model_short}){Colors.ENDC}")
+                            sys.stdout.flush()
                                 
                         except Exception:
                             failed_count += 1
