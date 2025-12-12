@@ -1174,24 +1174,29 @@ def _setup_tts_environment(base_dir: Path):
 
 
 class _SuppressOutput:
-    """Context manager to redirect stdout/stderr to log file during TTS operations"""
+    """Context manager to suppress TTS library output (Windows-compatible)"""
     def __init__(self, log_file_path=None):
         self.log_file_path = log_file_path
         
     def __enter__(self):
         import sys
+        import os
+        
+        # Save original streams
         self._original_stdout = sys.stdout
         self._original_stderr = sys.stderr
         
+        # Redirect to log file or null device using Python-level redirection only
+        # (OS-level redirection with os.dup2 causes issues with tqdm on Windows)
         if self.log_file_path:
-            # Open log file and redirect Python-level streams only
-            self.log_file = open(self.log_file_path, 'a', encoding='utf-8', buffering=1)
-            sys.stdout = self.log_file
-            sys.stderr = self.log_file
+            self.redirect_file = open(self.log_file_path, 'a', encoding='utf-8', buffering=1)
+            sys.stdout = self.redirect_file
+            sys.stderr = self.redirect_file
         else:
             import io
             sys.stdout = io.StringIO()
             sys.stderr = io.StringIO()
+        
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -1201,9 +1206,79 @@ class _SuppressOutput:
         sys.stdout = self._original_stdout
         sys.stderr = self._original_stderr
         
-        # Close log file if it was opened
-        if self.log_file_path and hasattr(self, 'log_file'):
-            self.log_file.close()
+        # Close redirect file if it was opened
+        if hasattr(self, 'redirect_file'):
+            try:
+                self.redirect_file.close()
+            except:
+                pass
+
+
+def _run_subprocess_with_logging(
+    command: list,
+    log_file_path: Path,
+    cwd: Path = None,
+    description: str = "Process"
+) -> bool:
+    """
+    Run a subprocess with real-time output streaming to console and log file.
+    
+    Args:
+        command: Command and arguments to execute
+        log_file_path: Path to log file for output capture
+        cwd: Working directory for subprocess (optional)
+        description: Description of the process for error messages
+    
+    Returns:
+        True if process succeeded (exit code 0), False otherwise
+    """
+    import traceback
+    
+    try:
+        print_info(f"Running {description}...")
+        print_info(f"Output will be logged to: {log_file_path}")
+        sys.stdout.flush()
+        
+        with open(log_file_path, 'w') as log_file:
+            process = subprocess.Popen(
+                command,
+                cwd=str(cwd) if cwd else None,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1
+            )
+            
+            # Stream output to both console and log file in real-time
+            for line in process.stdout:
+                print(line, end='', flush=True)
+                log_file.write(line)
+                log_file.flush()
+            
+            process.wait()
+        
+        if process.returncode == 0:
+            print_success(f"{description} completed successfully")
+            return True
+        else:
+            print_error(f"{description} failed with exit code {process.returncode}")
+            print_info(f"Check log file for details: {log_file_path}")
+            return False
+            
+    except Exception as e:
+        print_error(f"{description} failed: {e}")
+        print_info(f"Check log file for details: {log_file_path}")
+        
+        # Log the exception to file
+        try:
+            with open(log_file_path, 'a') as f:
+                f.write(f"\n\n=== Exception ===\n")
+                f.write(f"Error: {str(e)}\n")
+                f.write(traceback.format_exc())
+        except:
+            pass
+        
+        return False
 
 
 def _get_process_usage():
@@ -1278,6 +1353,284 @@ def _setup_tts_environment(base_dir: Path):
     return device
 
 
+def _generate_tts_samples_with_model(
+    tts,
+    model_config: dict,
+    texts: list,
+    output_train_dir: Path,
+    output_test_dir: Path,
+    n_samples: int,
+    n_samples_val: int,
+    train_count: int,
+    test_count: int,
+    failed_count: int,
+    base_dir: Path,
+    sample_type: str = "Positive"
+) -> tuple[int, int, int]:
+    """
+    Generate TTS samples for a single model configuration.
+    
+    Args:
+        tts: Loaded TTS model instance
+        model_config: Model configuration dict
+        texts: List of texts to synthesize
+        output_train_dir: Directory for training samples
+        output_test_dir: Directory for test samples
+        n_samples: Total training samples needed
+        n_samples_val: Total test samples needed
+        train_count: Current training sample count
+        test_count: Current test sample count
+        failed_count: Current failed sample count
+        base_dir: Base directory for project
+        sample_type: "Positive" or "Negative" for progress bar label
+    
+    Returns:
+        Tuple of (train_count, test_count, failed_count)
+    """
+    import numpy as np
+    import librosa
+    import soundfile as sf
+    from tqdm import tqdm
+    import sys
+    
+    tts_log_path = base_dir / "tts_output.log"
+    model_path = model_config["model"]
+    model_short = model_path.split('/')[-1]
+    
+    # Check if this model has a sample limit (for slow models)
+    model_limit = model_config.get("max_samples", None)
+    if model_limit is not None:
+        model_train_target = min(model_limit, n_samples - train_count)
+        model_test_target = min(model_limit // 10, n_samples_val - test_count)
+    else:
+        model_train_target = n_samples
+        model_test_target = n_samples_val
+    
+    # Get native sample rate
+    try:
+        if hasattr(tts, 'synthesizer') and hasattr(tts.synthesizer, 'output_sample_rate'):
+            native_sr = tts.synthesizer.output_sample_rate
+        else:
+            native_sr = 22050
+    except:
+        native_sr = 22050
+    
+    print_info(f"Starting generation with {len(texts)} text variant(s)...")
+    print_info(f"Native TTS sample rate: {native_sr}Hz → Resampling to 16kHz")
+    
+    # Setup progress bar
+    need_resample = (native_sr != 16000)
+    gender = model_config.get("gender", "voice")
+    speaker = model_config.get("speaker", "")
+    speaker_suffix = f"_{speaker}_{gender}" if speaker else f"_{gender}"
+    model_desc = f"{model_short}{speaker_suffix}"
+    total_target = n_samples + n_samples_val
+    pbar = tqdm(total=total_target, desc=f"{sample_type} ({model_desc})", 
+               unit="samples", initial=train_count + test_count,
+               file=sys.stdout, mininterval=0.5, dynamic_ncols=True,
+               bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]')
+    
+    progress_update_interval = 10
+    text_idx = 0
+    model_train_count = 0
+    
+    # Generate training samples
+    samples_per_text = max(1, (n_samples - train_count) // len(texts))
+    for text in texts:
+        combo_count = 0
+        while train_count < n_samples and combo_count < samples_per_text and model_train_count < model_train_target:
+            output_file = output_train_dir / f"{model_short}_{train_count}.wav"
+            
+            try:
+                # Generate with speed variation
+                speed = 1.0 + np.random.uniform(-0.1, 0.1)
+                
+                kwargs = {
+                    'text': text,
+                    'speed': speed
+                }
+                
+                if 'speaker' in model_config:
+                    kwargs['speaker'] = model_config['speaker']
+                if 'language' in model_config:
+                    kwargs['language'] = model_config['language']
+                
+                # Generate directly to numpy array (in-memory, no temp file)
+                with _SuppressOutput(log_file_path=str(tts_log_path)):
+                    if hasattr(tts, 'tts') and callable(tts.tts):
+                        audio = tts.tts(**kwargs)
+                        # Convert to numpy array if it's a list
+                        if isinstance(audio, list):
+                            audio = np.array(audio)
+                    else:
+                        # Fallback to file-based if in-memory not supported
+                        temp_file = output_file.parent / f"temp_{output_file.name}"
+                        kwargs['file_path'] = str(temp_file)
+                        tts.tts_to_file(**kwargs)
+                        audio, _ = librosa.load(str(temp_file), sr=native_sr, mono=True)
+                        temp_file.unlink()
+                
+                # Trim silence
+                audio_trimmed, _ = librosa.effects.trim(audio, top_db=30)
+                
+                # Skip if too long
+                if len(audio_trimmed) / native_sr > 4.0:
+                    failed_count += 1
+                    combo_count += 1
+                    continue
+                
+                # Resample to 16kHz only if needed
+                if need_resample:
+                    audio_16k = librosa.resample(audio_trimmed, orig_sr=native_sr, target_sr=16000)
+                else:
+                    audio_16k = audio_trimmed
+                
+                # Normalize
+                if len(audio_16k) > 0:
+                    max_val = np.abs(audio_16k).max()
+                    if max_val > 0:
+                        audio_16k = audio_16k / max_val * 0.95
+                
+                # Save directly as 16kHz PCM_16
+                sf.write(str(output_file), audio_16k, 16000, subtype='PCM_16')
+                
+                train_count += 1
+                model_train_count += 1
+                combo_count += 1
+                
+                # Update progress only every N samples to reduce overhead
+                if train_count % progress_update_interval == 0:
+                    cpu_usage, gpu_usage = _get_process_usage()
+                    text_display = text[:30] + '...' if len(text) > 30 else text
+                    total_valid = train_count + test_count
+                    pbar.n = total_valid
+                    pbar.set_postfix({
+                        'Train': train_count,
+                        'Test': test_count,
+                        'Failed': failed_count,
+                        'CPU': f'{cpu_usage:.0f}%',
+                        'GPU': gpu_usage,
+                        'Text': text_display
+                    })
+                    pbar.refresh()
+                
+            except Exception as e:
+                # Log detailed error to file for debugging
+                with open(tts_log_path, 'a') as f:
+                    import traceback
+                    f.write(f"\n=== Error generating {sample_type.lower()} sample {train_count} ===\n")
+                    f.write(f"Model: {model_short}, Text: {text}\n")
+                    f.write(f"Error: {str(e)}\n")
+                    f.write(traceback.format_exc())
+                    f.write("\n")
+                failed_count += 1
+                combo_count += 1
+                if output_file.exists():
+                    output_file.unlink()
+                continue
+    
+    # Generate test samples
+    text_idx = 0
+    model_test_count = 0
+    test_samples_per_text = max(1, model_test_target // len(texts))
+    
+    while test_count < n_samples_val and model_test_count < model_test_target and text_idx < len(texts) * 2:
+        text = texts[text_idx % len(texts)]
+        text_idx += 1
+        
+        output_file = output_test_dir / f"{model_short}_test_{test_count}.wav"
+        temp_file = output_file.parent / f"temp_{output_file.name}"
+        
+        try:
+            # Generate with speed variation
+            speed = 1.0 + np.random.uniform(-0.1, 0.1)
+            
+            kwargs = {
+                'text': text,
+                'file_path': str(temp_file),
+                'speed': speed
+            }
+            
+            if 'speaker' in model_config:
+                kwargs['speaker'] = model_config['speaker']
+            if 'language' in model_config:
+                kwargs['language'] = model_config['language']
+            
+            # Generate sample with suppressed output
+            with _SuppressOutput(log_file_path=str(tts_log_path)):
+                tts.tts_to_file(**kwargs)
+            
+            # Load, resample, trim, and save in one efficient step
+            audio, sr = librosa.load(str(temp_file), sr=native_sr, mono=True)
+            audio_trimmed, _ = librosa.effects.trim(audio, top_db=30)
+            
+            if len(audio_trimmed) / native_sr > 4.0:
+                temp_file.unlink()
+                failed_count += 1
+                continue
+            
+            if native_sr != 16000:
+                audio_16k = librosa.resample(audio_trimmed, orig_sr=native_sr, target_sr=16000)
+            else:
+                audio_16k = audio_trimmed
+            
+            if len(audio_16k) > 0:
+                max_val = np.abs(audio_16k).max()
+                if max_val > 0:
+                    audio_16k = audio_16k / max_val * 0.95
+            
+            sf.write(str(output_file), audio_16k, 16000, subtype='PCM_16')
+            temp_file.unlink()
+            
+            test_count += 1
+            model_test_count += 1
+            
+            # Update progress bar
+            cpu_usage, gpu_usage = _get_process_usage()
+            total_valid = train_count + test_count
+            var_display = text if len(text) <= 15 else text[:12] + '...'
+            pbar.n = total_valid
+            pbar.set_postfix({
+                'Train': train_count,
+                'Test': test_count,
+                'Failed': failed_count,
+                'CPU': f'{cpu_usage:.0f}%',
+                'GPU': gpu_usage,
+                'Text': f"'{var_display}'"
+            })
+            pbar.refresh()
+            
+        except Exception as e:
+            # Log detailed error to file for debugging
+            with open(tts_log_path, 'a') as f:
+                import traceback
+                f.write(f"\n=== Error generating {sample_type.lower()} test sample {test_count} ===\n")
+                f.write(f"Model: {model_short}, Text: {text}\n")
+                f.write(f"Error: {str(e)}\n")
+                f.write(traceback.format_exc())
+                f.write("\n")
+            failed_count += 1
+            if temp_file.exists():
+                temp_file.unlink()
+            if output_file.exists():
+                output_file.unlink()
+            continue
+    
+    # Close progress bar
+    pbar.close()
+    
+    # Report completion
+    total_valid = train_count + test_count
+    if failed_count > 0:
+        total_attempts = total_valid + failed_count
+        fail_pct = (failed_count / total_attempts * 100) if total_attempts > 0 else 0
+        print_success(f"Completed model '{model_short}': {train_count} train + {test_count} test, {failed_count} failed ({fail_pct:.1f}%)")
+    else:
+        print_success(f"Completed model '{model_short}': {train_count} train + {test_count} test")
+    
+    return train_count, test_count, failed_count
+
+
 def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: int, n_samples_val: int, base_dir: Path) -> bool:
     """Generate positive samples (wake word pronunciations) using TTS"""
     print_header("Generating Positive Samples")
@@ -1312,320 +1665,72 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
         failed_count = 0
         
         for model_config in tts_models:
-            # Check if this model has a sample limit (for slow models)
-            model_limit = model_config.get("max_samples", None)
-            if model_limit is not None:
-                # For limited models, only generate up to the limit
-                model_train_target = min(model_limit, n_samples - train_count)
-                model_test_target = min(model_limit // 10, n_samples_val - test_count)
-            else:
-                # No limit - use normal targets
-                model_train_target = n_samples
-                model_test_target = n_samples_val
-            
             model_path = model_config["model"]
             model_short = model_path.split('/')[-1]
             
             # Clear any previous progress line
             print("\r" + " " * 120 + "\r", end='', flush=True)
             print_info(f"Loading model: {model_short}...")
+            
             try:
-                # Load model (allow auto-download)
-                import logging
-                import threading
-                import time as time_module
-                import sys
-                import os
-                
                 # Setup TTS log file for redirecting verbose output
                 tts_log_path = base_dir / "tts_output.log"
                 
-                # Spinner for model loading
-                loading_done = threading.Event()
-                def spinner(message):
-                    spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
-                    idx = 0
-                    start_time = time_module.time()
-                    while not loading_done.is_set():
-                        elapsed = time_module.time() - start_time
-                        print(f"\r{Colors.OKCYAN}  {spinner_chars[idx]} {message} (elapsed: {int(elapsed)}s){Colors.ENDC}", 
-                              end='', flush=True)
-                        idx = (idx + 1) % len(spinner_chars)
-                        time_module.sleep(0.1)
-                    # Clear spinner line
-                    print("\r" + " " * 80 + "\r", end='', flush=True)
+                # Redirect TTS library logging to file
+                import logging
+                tts_logger = logging.getLogger('TTS')
+                tts_logger.setLevel(logging.WARNING)
+                file_handler = logging.FileHandler(tts_log_path, mode='a')
+                file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+                tts_logger.addHandler(file_handler)
                 
-                # Start spinner for initialization
-                spinner_thread = threading.Thread(target=spinner, args=("Initializing TTS model...",))
-                spinner_thread.daemon = True
-                spinner_thread.start()
+                # Load TTS model with GPU support (suppress verbose output)
+                import warnings
+                warnings.filterwarnings('ignore', message='.*gpu.*will be deprecated.*')
                 
-                # Stop spinner before loading
-                loading_done.set()
-                spinner_thread.join(timeout=0.5)
-                
-                # Load TTS model with GPU support
-                try:
-                    # Load model first without gpu parameter (deprecated)
-                    import warnings
-                    warnings.filterwarnings('ignore', message='.*gpu.*will be deprecated.*')
+                # Suppress TTS library output during model loading
+                with _SuppressOutput(log_file_path=str(tts_log_path)):
                     tts = TTS(model_name=model_path)
-                    
-                    # Manually force synthesizer and vocoder to GPU
-                    if device == "cuda:0":
-                        if hasattr(tts, 'synthesizer') and tts.synthesizer is not None:
-                            if hasattr(tts.synthesizer, 'tts_model'):
-                                tts.synthesizer.tts_model = tts.synthesizer.tts_model.to(device)
-                        if hasattr(tts, 'vocoder') and tts.vocoder is not None:
-                            if hasattr(tts.vocoder, 'model'):
-                                tts.vocoder.model = tts.vocoder.model.to(device)
-                    
-                    print_success(f"Model {model_short} initialized on {device.upper()}\")")
-                except Exception as e:
-                    print_error(f"Failed to initialize TTS model: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    raise
                 
-                # Start spinner for GPU transfer
-                loading_done.clear()
-                spinner_thread = threading.Thread(target=spinner, args=(f"Moving model to {device.upper()}...",))
-                spinner_thread.daemon = True
-                spinner_thread.start()
+                # Manually force synthesizer and vocoder to GPU
+                if device == "cuda:0":
+                    if hasattr(tts, 'synthesizer') and tts.synthesizer is not None:
+                        if hasattr(tts.synthesizer, 'tts_model'):
+                            tts.synthesizer.tts_model = tts.synthesizer.tts_model.to(device)
+                    if hasattr(tts, 'vocoder') and tts.vocoder is not None:
+                        if hasattr(tts.vocoder, 'model'):
+                            tts.vocoder.model = tts.vocoder.model.to(device)
                 
-                # Stop spinner before GPU transfer
-                loading_done.set()
-                spinner_thread.join(timeout=0.5)
-                
-                # Transfer to GPU (note: TTS library uses gpu=True in constructor, not .to())
-                # tts = tts.to(device)  # This doesn't actually work for TTS inference
-                
+                print_success(f"Model {model_short} initialized on {device.upper()}\")")
                 print_success(f"Model {model_short} loaded successfully on {device.upper()}")
                 
-                # Get the synthesizer's native sample rate for efficient resampling
-                try:
-                    if hasattr(tts, 'synthesizer') and hasattr(tts.synthesizer, 'output_sample_rate'):
-                        native_sr = tts.synthesizer.output_sample_rate
-                    else:
-                        native_sr = 22050  # Default for most TTS models
-                except:
-                    native_sr = 22050
-                
-                print_info(f"Starting generation with {len(pronunciations)} pronunciation(s)...")
-                print_info(f"Native TTS sample rate: {native_sr}Hz → Resampling to 16kHz")
-                
-                # Initialize tqdm progress bar
-                from tqdm import tqdm
-                import librosa
-                import soundfile as sf
-                
-                # Pre-create resampler for performance (if resampling needed)
-                need_resample = (native_sr != 16000)
-                
-                gender = model_config.get("gender", "voice")
-                speaker = model_config.get("speaker", "")
-                speaker_suffix = f"_{speaker}_{gender}" if speaker else f"_{gender}"
-                model_desc = f"{model_short}{speaker_suffix}"
-                total_target = n_samples + n_samples_val
-                pbar = tqdm(total=total_target, desc=f"Positive ({model_desc})", 
-                           unit="samples", initial=0,
-                           bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]')
-                
-                # Progress update frequency (update every N samples to reduce overhead)
-                progress_update_interval = 10
-                
-                for variation in pronunciations:
-                    # Generate training samples
-                    combo_count = 0
-                    model_train_count = 0  # Track samples for this model
-                    while train_count < n_samples and combo_count < samples_per_combo and model_train_count < model_train_target:
-                        output_file = positive_train_dir / f"{model_short}_{train_count}.wav"
-                        
-                        try:
-                            # Generate with speed variation
-                            speed = 1.0 + np.random.uniform(-0.1, 0.1)
-                            
-                            kwargs = {
-                                'text': variation,
-                                'speed': speed
-                            }
-                            
-                            if 'speaker' in model_config:
-                                kwargs['speaker'] = model_config['speaker']
-                            if 'language' in model_config:
-                                kwargs['language'] = model_config['language']
-                            
-                            # Generate directly to numpy array (in-memory, no temp file)
-                            with _SuppressOutput():
-                                # Use tts_with_vc if available for in-memory synthesis
-                                if hasattr(tts, 'tts') and callable(tts.tts):
-                                    audio = tts.tts(**kwargs)
-                                else:
-                                    # Fallback to file-based if in-memory not supported
-                                    temp_file = output_file.parent / f"temp_{output_file.name}"
-                                    kwargs['file_path'] = str(temp_file)
-                                    tts.tts_to_file(**kwargs)
-                                    audio, _ = librosa.load(str(temp_file), sr=native_sr, mono=True)
-                                    temp_file.unlink()
-                            
-                            # Trim silence
-                            audio_trimmed, _ = librosa.effects.trim(audio, top_db=30)
-                            
-                            # Skip if too long
-                            if len(audio_trimmed) / native_sr > 4.0:
-                                failed_count += 1
-                                combo_count += 1
-                                continue
-                            
-                            # Resample to 16kHz only if needed
-                            if need_resample:
-                                audio_16k = librosa.resample(audio_trimmed, orig_sr=native_sr, target_sr=16000)
-                            else:
-                                audio_16k = audio_trimmed
-                            
-                            # Normalize
-                            if len(audio_16k) > 0:
-                                max_val = np.abs(audio_16k).max()
-                                if max_val > 0:
-                                    audio_16k = audio_16k / max_val * 0.95
-                            
-                            # Save directly as 16kHz PCM_16
-                            sf.write(str(output_file), audio_16k, 16000, subtype='PCM_16')
-                            
-                            train_count += 1
-                            model_train_count += 1
-                            combo_count += 1
-                            
-                            # Update progress only every N samples to reduce overhead
-                            if train_count % progress_update_interval == 0:
-                                cpu_usage, gpu_usage = _get_process_usage()
-                                text_display = variation[:30] + '...' if len(variation) > 30 else variation
-                                total_valid = train_count + test_count
-                                pbar.n = total_valid
-                                pbar.set_postfix({
-                                    'Train': train_count,
-                                    'Test': test_count,
-                                    'Failed': failed_count,
-                                    'CPU': f'{cpu_usage:.0f}%',
-                                    'GPU': gpu_usage,
-                                    'Text': text_display
-                                })
-                                pbar.refresh()
-                            
-                        except Exception as e:
-                            failed_count += 1
-                            combo_count += 1
-                            continue
-                                
-                        except Exception:
-                            failed_count += 1
-                            combo_count += 1
-                            if output_file.exists():
-                                output_file.unlink()
-                            continue
-                    
-                    # Generate test samples
-                    combo_test_count = 0
-                    model_test_count = 0  # Track test samples for this model
-                    test_samples_per_combo = max(1, model_test_target // len(pronunciations))
-                    while test_count < n_samples_val and combo_test_count < test_samples_per_combo and model_test_count < model_test_target:
-                        output_file = positive_test_dir / f"{model_short}_test_{test_count}.wav"
-                        temp_file = output_file.parent / f"temp_{output_file.name}"
-                        
-                        try:
-                            # Generate with speed variation
-                            speed = 1.0 + np.random.uniform(-0.1, 0.1)
-                            
-                            kwargs = {
-                                'text': variation,
-                                'file_path': str(temp_file),
-                                'speed': speed
-                            }
-                            
-                            if 'speaker' in model_config:
-                                kwargs['speaker'] = model_config['speaker']
-                            if 'language' in model_config:
-                                kwargs['language'] = model_config['language']
-                            
-                            # Generate sample with suppressed output
-                            with _SuppressOutput():
-                                tts.tts_to_file(**kwargs)
-                            
-                            # Load, resample, trim, and save in one efficient step
-                            audio, sr = librosa.load(str(temp_file), sr=native_sr, mono=True)
-                            audio_trimmed, _ = librosa.effects.trim(audio, top_db=30)
-                            
-                            if len(audio_trimmed) / native_sr > 4.0:
-                                temp_file.unlink()
-                                failed_count += 1
-                                combo_test_count += 1
-                                continue
-                            
-                            if native_sr != 16000:
-                                audio_16k = librosa.resample(audio_trimmed, orig_sr=native_sr, target_sr=16000)
-                            else:
-                                audio_16k = audio_trimmed
-                            
-                            if len(audio_16k) > 0:
-                                max_val = np.abs(audio_16k).max()
-                                if max_val > 0:
-                                    audio_16k = audio_16k / max_val * 0.95
-                            
-                            sf.write(str(output_file), audio_16k, 16000, subtype='PCM_16')
-                            temp_file.unlink()
-                            
-                            test_count += 1
-                            model_test_count += 1
-                            combo_test_count += 1
-                            
-                        except Exception as e:
-                            failed_count += 1
-                            combo_test_count += 1
-                            if temp_file.exists():
-                                temp_file.unlink()
-                            if output_file.exists():
-                                output_file.unlink()
-                            continue
-                            
-                            # Update progress bar with CPU/GPU usage
-                            cpu_usage, gpu_usage = _get_process_usage()
-                            total_valid = train_count + test_count
-                            var_display = variation if len(variation) <= 15 else variation[:12] + '...'
-                            pbar.n = total_valid
-                            pbar.set_postfix({
-                                'Train': train_count,
-                                'Test': test_count,
-                                'Failed': failed_count,
-                                'CPU': f'{cpu_usage:.0f}%',
-                                'GPU': gpu_usage,
-                                'Text': f"'{var_display}'"
-                            })
-                            pbar.refresh()
-                            pbar.refresh()
-                                
-                        except Exception:
-                            failed_count += 1
-                            combo_test_count += 1
-                            if output_file.exists():
-                                output_file.unlink()
-                            continue
-                    
-                    if train_count >= n_samples and test_count >= n_samples_val:
-                        break
-                
-                # Close progress bar
-                pbar.close()
-                
-                total_valid = train_count + test_count
-                total_attempts = total_valid + failed_count
-                fail_pct = (failed_count / total_attempts * 100) if total_attempts > 0 else 0
-                print_success(f"Completed model '{model_short}': {train_count} train + {test_count} test, {failed_count} failed ({fail_pct:.1f}%)")
+                # Use common function to generate samples
+                train_count, test_count, failed_count = _generate_tts_samples_with_model(
+                    tts=tts,
+                    model_config=model_config,
+                    texts=pronunciations,
+                    output_train_dir=positive_train_dir,
+                    output_test_dir=positive_test_dir,
+                    n_samples=n_samples,
+                    n_samples_val=n_samples_val,
+                    train_count=train_count,
+                    test_count=test_count,
+                    failed_count=failed_count,
+                    base_dir=base_dir,
+                    sample_type="Positive"
+                )
                         
             except Exception as e:
-                # Close progress bar on error if it exists
-                if 'pbar' in locals():
-                    pbar.close()
+                # Log full error details to file
+                tts_log_path = base_dir / "tts_output.log"
+                with open(tts_log_path, 'a') as f:
+                    import traceback
+                    f.write(f"\n=== Model {model_short} failed ===\n")
+                    f.write(f"Error: {str(e)}\n")
+                    f.write(traceback.format_exc())
+                    f.write("\n")
                 print_warning(f"Model {model_short} failed: {e}")
+                print_info(f"Full error details logged to: {tts_log_path}")
                 continue
             
             if train_count >= n_samples and test_count >= n_samples_val:
@@ -1716,6 +1821,17 @@ def _generate_negative_samples(wake_word: str, n_samples: int, n_samples_val: in
         # Setup TTS environment
         device = _setup_tts_environment(base_dir)
         
+        # Setup TTS log file for redirecting verbose output
+        tts_log_path = base_dir / "tts_output.log"
+        
+        # Redirect TTS library logging to file
+        import logging
+        tts_logger = logging.getLogger('TTS')
+        tts_logger.setLevel(logging.WARNING)
+        file_handler = logging.FileHandler(tts_log_path, mode='a')
+        file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+        tts_logger.addHandler(file_handler)
+        
         # Use the same TTS models as positive sample generation
         tts_models_config = _get_tts_models_config()
         
@@ -1762,10 +1878,14 @@ def _generate_negative_samples(wake_word: str, n_samples: int, n_samples_val: in
                 init_thread.daemon = True
                 init_thread.start()
                 
-                # Load model without deprecated gpu parameter
+                # Load model without deprecated gpu parameter (suppress verbose output)
                 import warnings
                 warnings.filterwarnings('ignore', message='.*gpu.*will be deprecated.*')
-                tts = TTS(model_name=model_name)
+                
+                # Suppress TTS library output during model loading
+                with _SuppressOutput(log_file_path=str(tts_log_path)):
+                    tts = TTS(model_name=model_name)
+                
                 init_done.set()
                 init_thread.join(timeout=0.5)
                 
@@ -1822,6 +1942,7 @@ def _generate_negative_samples(wake_word: str, n_samples: int, n_samples_val: in
                 total_target = n_samples + n_samples_val
                 pbar = tqdm(total=total_target, desc=f"Negative ({model_desc})", 
                            unit="samples", initial=0,
+                           file=sys.stdout, mininterval=0.5, dynamic_ncols=True,
                            bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]')
                 
                 try:
@@ -1879,31 +2000,34 @@ def _generate_negative_samples(wake_word: str, n_samples: int, n_samples_val: in
                             train_count += 1
                             model_train_count += 1
                             
+                            # Update progress bar (every 10 samples to reduce overhead)
+                            if train_count % 10 == 0:
+                                cpu_usage, gpu_usage = _get_process_usage()
+                                total_valid = train_count + test_count
+                                text_display = text if len(text) <= 30 else text[:27] + '...'
+                                pbar.n = total_valid
+                                pbar.set_postfix({
+                                    'Train': train_count,
+                                    'Test': test_count,
+                                    'Failed': failed_count,
+                                    'CPU': f'{cpu_usage:.0f}%',
+                                    'GPU': gpu_usage,
+                                    'Text': text_display
+                                })
+                                pbar.refresh()
+                            
                         except Exception as e:
+                            # Log detailed error to file for debugging
+                            with open(tts_log_path, 'a') as f:
+                                import traceback
+                                f.write(f"\n=== Error generating negative sample {train_count} ===\n")
+                                f.write(f"Model: {model_short}, Text: {text}\n")
+                                f.write(f"Error: {str(e)}\n")
+                                f.write(traceback.format_exc())
+                                f.write("\n")
                             failed_count += 1
                             if temp_file.exists():
                                 temp_file.unlink()
-                            if output_file.exists():
-                                output_file.unlink()
-                            continue
-                            
-                            # Update progress bar with CPU/GPU usage
-                            cpu_usage, gpu_usage = _get_process_usage()
-                            total_valid = train_count + test_count
-                            text_display = text if len(text) <= 30 else text[:27] + '...'
-                            pbar.n = total_valid
-                            pbar.set_postfix({
-                                'Train': train_count,
-                                'Test': test_count,
-                                'Failed': failed_count,
-                                'CPU': f'{cpu_usage:.0f}%',
-                                'GPU': gpu_usage,
-                                'Text': text_display
-                            })
-                            pbar.refresh()
-                            
-                        except Exception:
-                            failed_count += 1
                             if output_file.exists():
                                 output_file.unlink()
                             continue
@@ -1962,15 +2086,7 @@ def _generate_negative_samples(wake_word: str, n_samples: int, n_samples_val: in
                             test_count += 1
                             model_test_count += 1
                             
-                        except Exception as e:
-                            failed_count += 1
-                            if temp_file.exists():
-                                temp_file.unlink()
-                            if output_file.exists():
-                                output_file.unlink()
-                            continue
-                            
-                            # Update progress bar with CPU/GPU usage
+                            # Update progress bar
                             cpu_usage, gpu_usage = _get_process_usage()
                             total_valid = train_count + test_count
                             text_display = text if len(text) <= 30 else text[:27] + '...'
@@ -1985,8 +2101,18 @@ def _generate_negative_samples(wake_word: str, n_samples: int, n_samples_val: in
                             })
                             pbar.refresh()
                             
-                        except Exception:
+                        except Exception as e:
+                            # Log detailed error to file for debugging
+                            with open(tts_log_path, 'a') as f:
+                                import traceback
+                                f.write(f"\n=== Error generating negative test sample {test_count} ===\n")
+                                f.write(f"Model: {model_short}, Text: {text}\n")
+                                f.write(f"Error: {str(e)}\n")
+                                f.write(traceback.format_exc())
+                                f.write("\n")
                             failed_count += 1
+                            if temp_file.exists():
+                                temp_file.unlink()
                             if output_file.exists():
                                 output_file.unlink()
                             continue
@@ -2002,9 +2128,15 @@ def _generate_negative_samples(wake_word: str, n_samples: int, n_samples_val: in
                     # Close progress bar on error
                     if 'pbar' in locals():
                         pbar.close()
-                    print_error(f"Critical error with model {model_short}: {model_error}")
-                    import traceback
-                    traceback.print_exc()
+                    # Log full error details to file
+                    with open(tts_log_path, 'a') as f:
+                        import traceback
+                        f.write(f"\n=== Negative samples: Model {model_short} failed ===\n")
+                        f.write(f"Error: {str(model_error)}\n")
+                        f.write(traceback.format_exc())
+                        f.write("\n")
+                    print_warning(f"Model {model_short} failed: {model_error}")
+                    print_info(f"Full error details logged to: {tts_log_path}")
                     continue  # Try next model instead of aborting
                 
             except Exception as e:
@@ -2048,7 +2180,6 @@ def _generate_negative_samples(wake_word: str, n_samples: int, n_samples_val: in
 def augment_samples(config_file: Path, base_dir: Path) -> bool:
     """Augment samples with background noise and room impulse responses"""
     print_header("Augmenting Samples")
-    
     print_info("Applying audio augmentation (noise, music, reverb)")
     print_info("This may take several minutes...")
     
@@ -2059,25 +2190,16 @@ def augment_samples(config_file: Path, base_dir: Path) -> bool:
         print_error(f"Training script not found: {train_script}")
         return False
     
-    try:
-        result = subprocess.run(
-            [sys.executable, str(train_script),
-             '--training_config', str(config_file),
-             '--augment_clips'],
-            cwd=str(openwakeword_dir),
-            capture_output=False
-        )
-        
-        if result.returncode == 0:
-            print_success("Augmentation completed")
-            return True
-        else:
-            print_error("Augmentation failed")
-            return False
-            
-    except Exception as e:
-        print_error(f"Augmentation failed: {e}")
-        return False
+    aug_log_path = base_dir / "augmentation_output.log"
+    
+    return _run_subprocess_with_logging(
+        command=[sys.executable, str(train_script),
+                '--training_config', str(config_file),
+                '--augment_clips'],
+        log_file_path=aug_log_path,
+        cwd=openwakeword_dir,
+        description="Augmentation"
+    )
 
 def train_model(config_file: Path, base_dir: Path) -> bool:
     """Train the wake word model"""
@@ -2093,25 +2215,16 @@ def train_model(config_file: Path, base_dir: Path) -> bool:
         print_error(f"Training script not found: {train_script}")
         return False
     
-    try:
-        result = subprocess.run(
-            [sys.executable, str(train_script),
-             '--training_config', str(config_file),
-             '--train_model'],
-            cwd=str(openwakeword_dir),
-            capture_output=False
-        )
-        
-        if result.returncode == 0:
-            print_success("Training completed")
-            return True
-        else:
-            print_error("Training failed")
-            return False
-            
-    except Exception as e:
-        print_error(f"Training failed: {e}")
-        return False
+    train_log_path = base_dir / "training_output.log"
+    
+    return _run_subprocess_with_logging(
+        command=[sys.executable, str(train_script),
+                '--training_config', str(config_file),
+                '--train_model'],
+        log_file_path=train_log_path,
+        cwd=openwakeword_dir,
+        description="Training"
+    )
 
 
 
@@ -2439,29 +2552,6 @@ def main():
             if audioset_count < 100:
                 print_warning("Low sample count may result in reduced model quality")
     
-    # Step 4.6: Convert all audio files to 16kHz (AFTER downloading)
-    print_header("Audio Sample Rate Verification")
-    print_info("Checking and converting background audio files to 16kHz...")
-    print_info("This ensures compatibility with training pipeline")
-    print_info("Corrupted files will be automatically removed")
-    
-    # Create a minimal config dict with just the paths
-    audio_config = {
-        'background_paths': [
-            str(base_dir / "audioset_16k"),
-            str(base_dir / "fma")
-        ],
-        'rir_paths': [
-            str(base_dir / "mit_rirs"),
-            str(base_dir / "MIT_environmental_impulse_responses")
-        ]
-    }
-    
-    if not check_and_fix_audio_sample_rates(audio_config, remove_corrupted=True):
-        print_warning("Some audio files could not be converted to 16kHz")
-        if not get_yes_no("Continue anyway? (may cause training errors)", default=True):
-            sys.exit(1)
-    
     # Step 5: Get training parameters
     print_header("Training Parameters")
     
@@ -2514,6 +2604,34 @@ def main():
     if not generate_samples(wake_word, pronunciations, n_samples, base_dir):
         print_error("Sample generation failed")
         if not get_yes_no("Continue with existing samples?", default=False):
+            sys.exit(1)
+    
+    # Step 8.5: Verify all audio files are 16kHz (generated samples + background audio)
+    print_header("Audio Sample Rate Verification")
+    print_info("Checking and converting ALL audio files to 16kHz...")
+    print_info("This includes generated TTS samples and background audio")
+    print_info("Corrupted files will be automatically removed")
+    
+    # Create a config dict with all audio paths (generated + background)
+    model_name = wake_word.lower().replace(' ', '_')
+    audio_config = {
+        'background_paths': [
+            str(base_dir / "audioset_16k"),
+            str(base_dir / "fma"),
+            str(base_dir / "trained_models" / model_name / "positive_train"),
+            str(base_dir / "trained_models" / model_name / "positive_test"),
+            str(base_dir / "trained_models" / model_name / "negative_train"),
+            str(base_dir / "trained_models" / model_name / "negative_test")
+        ],
+        'rir_paths': [
+            str(base_dir / "mit_rirs"),
+            str(base_dir / "MIT_environmental_impulse_responses")
+        ]
+    }
+    
+    if not check_and_fix_audio_sample_rates(audio_config, remove_corrupted=True):
+        print_warning("Some audio files could not be converted to 16kHz")
+        if not get_yes_no("Continue anyway? (may cause training errors)", default=True):
             sys.exit(1)
     
     # Step 9: Augment samples
