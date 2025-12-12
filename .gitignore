@@ -9,3 +9,5 @@ openwakeword/
 /mit_rirs
 fma_temp.zip
 *.log
+/audioset_16k
+/MIT_environmental_impulse_responses
