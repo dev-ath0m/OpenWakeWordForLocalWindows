@@ -1289,8 +1289,19 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                 loading_done.set()
                 spinner_thread.join(timeout=0.5)
                 
+                print("\n[DEBUG] About to set logging level...")
+                import sys
+                sys.stdout.flush()
+                
                 logging.getLogger('TTS').setLevel(logging.CRITICAL)
+                
+                print("[DEBUG] Logging level set, printing success message...")
+                sys.stdout.flush()
+                
                 print_success(f"Model {model_short} loaded successfully")
+                
+                print(f"[DEBUG] Success printed. Pronunciations: {pronunciations}")
+                sys.stdout.flush()
                 
                 # Flag to track first generation (warmup)
                 first_generation = True
@@ -1383,11 +1394,12 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                             
                             var_display = variation if len(variation) <= 20 else variation[:17] + '...'
                             
-                            # Clear line first, then print progress (Windows PowerShell compatibility)
+                            # Use ANSI escape codes for better terminal compatibility
                             import sys
-                            sys.stdout.write('\r' + ' ' * 120 + '\r')
-                            sys.stdout.write(f"{Colors.OKCYAN}[{bar}] {progress_pct:5.1f}% | {valid_count}/{n_samples} valid | "
-                                           f"Failed: {fail_pct:4.1f}% | Current: '{var_display}' ({model_short}){Colors.ENDC}")
+                            # Move to start of line, clear line, write progress
+                            progress_line = f"[{bar}] {progress_pct:5.1f}% | {valid_count}/{n_samples} valid | Failed: {fail_pct:4.1f}% | Current: '{var_display}' ({model_short})"
+                            # \033[2K clears entire line, \r returns to start
+                            sys.stdout.write(f"\033[2K\r{Colors.OKCYAN}{progress_line}{Colors.ENDC}")
                             sys.stdout.flush()
                                 
                         except Exception:
