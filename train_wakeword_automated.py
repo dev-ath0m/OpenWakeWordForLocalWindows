@@ -15,6 +15,11 @@ from typing import Optional, Tuple
 import json
 import psutil
 import importlib.util
+import warnings
+
+# Suppress FutureWarning about pynvml deprecation (PyTorch CUDA still uses old import)
+# The nvidia-ml-py package is installed and will be used automatically
+warnings.filterwarnings('ignore', message='.*pynvml package is deprecated.*')
 
 # Color codes for terminal output
 class Colors:
