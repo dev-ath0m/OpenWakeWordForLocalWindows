@@ -2331,11 +2331,18 @@ def _patch_openwakeword_train_py(base_dir: Path) -> bool:
         with open(data_py_path, 'r', encoding='utf-8') as f:
             data_content = f.read()
         
-        # Check if patches already applied
-        if 'onnx2tf' in train_content and 'explicit close + gc' in data_content:
-            return True  # Already patched
+        # Check if patches already applied (look for minimal API version)
+        minimal_api_signature = 'onnx2tf.convert(\n                input_onnx_file_path=onnx_model_path,\n                output_folder_path=tmp_dir\n            )'
+        if minimal_api_signature in train_content and 'explicit close + gc' in data_content:
+            return True  # Already patched with correct version
         
-        print_info("Applying compatibility patches to OpenWakeWord...")
+        # Check if old patch with deprecated API is present
+        old_patch_present = 'output_tfjs=False' in train_content and 'onnx2tf.convert(' in train_content
+        
+        if old_patch_present:
+            print_warning("Old onnx2tf patch detected - updating to current API...")
+        else:
+            print_info("Applying compatibility patches to OpenWakeWord...")
         
         # Patch 1: Fix TFLite conversion in train.py
         old_convert_func = '''# Separate function to convert onnx models to tflite format
