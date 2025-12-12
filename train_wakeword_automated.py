@@ -1302,14 +1302,13 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                 spinner_thread.daemon = True
                 spinner_thread.start()
                 
-                # Stop spinner before redirecting output
+                # Stop spinner before loading
                 loading_done.set()
                 spinner_thread.join(timeout=0.5)
                 
-                # Load TTS model with output redirected to log
+                # Load TTS model
                 try:
-                    with _SuppressOutput(log_file_path=tts_log_path):
-                        tts = TTS(model_name=model_path)
+                    tts = TTS(model_name=model_path)
                     print_success(f"Model {model_short} initialized")
                 except Exception as e:
                     print_error(f"Failed to initialize TTS model: {e}")
@@ -1323,13 +1322,12 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                 spinner_thread.daemon = True
                 spinner_thread.start()
                 
-                # Stop spinner before redirecting output
+                # Stop spinner before GPU transfer
                 loading_done.set()
                 spinner_thread.join(timeout=0.5)
                 
-                # Transfer to GPU with output redirected to log
-                with _SuppressOutput(log_file_path=tts_log_path):
-                    tts = tts.to(device)
+                # Transfer to GPU
+                tts = tts.to(device)
                 
                 print_success(f"Model {model_short} loaded successfully")
                 
