@@ -2335,30 +2335,7 @@ def main():
     # Step 2.7: Check background datasets (optional but recommended)
     background_status = check_background_datasets(base_dir)
     
-    # Step 2.8: Convert all audio files to 16kHz
-    print_header("Audio Sample Rate Verification")
-    print_info("Checking and converting background audio files to 16kHz...")
-    print_info("This ensures compatibility with training pipeline")
-    print_info("Corrupted files will be automatically removed")
-    
-    # Create a minimal config dict with just the paths
-    audio_config = {
-        'background_paths': [
-            str(base_dir / "audioset_16k"),
-            str(base_dir / "fma")
-        ],
-        'rir_paths': [
-            str(base_dir / "mit_rirs"),
-            str(base_dir / "MIT_environmental_impulse_responses")
-        ]
-    }
-    
-    if not check_and_fix_audio_sample_rates(audio_config, remove_corrupted=True):
-        print_warning("Some audio files could not be converted to 16kHz")
-        if not get_yes_no("Continue anyway? (may cause training errors)", default=True):
-            sys.exit(1)
-    
-    # Step 2.9: Check if we have sufficient samples, offer to download more
+    # Step 2.8: Check if we have sufficient samples, offer to download more
     audioset_path = base_dir / "audioset_16k"
     audioset_count = len(list(audioset_path.rglob("*.wav"))) if audioset_path.exists() else 0
     
@@ -2395,10 +2372,6 @@ def main():
                     if result.returncode == 0:
                         new_count = len(list(audioset_path.rglob("*.wav")))
                         print_success(f"AudioSet download complete: {new_count} files total")
-                        
-                        # Convert newly downloaded files to 16kHz
-                        print_info("Converting newly downloaded files to 16kHz...")
-                        check_and_fix_audio_sample_rates(audio_config, remove_corrupted=True)
                     else:
                         print_warning("AudioSet download incomplete or failed")
                         print_info("Continuing with existing samples")
@@ -2414,6 +2387,29 @@ def main():
             print_info(f"Continuing with {audioset_count} AudioSet samples")
             if audioset_count < 100:
                 print_warning("Low sample count may result in reduced model quality")
+    
+    # Step 2.9: Convert all audio files to 16kHz (AFTER downloading)
+    print_header("Audio Sample Rate Verification")
+    print_info("Checking and converting background audio files to 16kHz...")
+    print_info("This ensures compatibility with training pipeline")
+    print_info("Corrupted files will be automatically removed")
+    
+    # Create a minimal config dict with just the paths
+    audio_config = {
+        'background_paths': [
+            str(base_dir / "audioset_16k"),
+            str(base_dir / "fma")
+        ],
+        'rir_paths': [
+            str(base_dir / "mit_rirs"),
+            str(base_dir / "MIT_environmental_impulse_responses")
+        ]
+    }
+    
+    if not check_and_fix_audio_sample_rates(audio_config, remove_corrupted=True):
+        print_warning("Some audio files could not be converted to 16kHz")
+        if not get_yes_no("Continue anyway? (may cause training errors)", default=True):
+            sys.exit(1)
     
     print_success("\nAll environment checks passed!")
     
