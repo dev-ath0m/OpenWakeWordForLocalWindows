@@ -726,6 +726,7 @@ def get_user_input(prompt: str, default: str = None, input_type: type = str):
         full_prompt = f"{Colors.OKCYAN}{prompt}: {Colors.ENDC}"
     
     while True:
+        sys.stdout.flush()  # Ensure prompt is displayed
         user_input = input(full_prompt).strip()
         
         if not user_input and default:
@@ -745,6 +746,7 @@ def get_yes_no(prompt: str, default: bool = True) -> bool:
     full_prompt = f"{Colors.OKCYAN}{prompt} [{default_str}]: {Colors.ENDC}"
     
     while True:
+        sys.stdout.flush()  # Ensure prompt is displayed
         response = input(full_prompt).strip().lower()
         
         if not response:
@@ -2332,7 +2334,35 @@ def main():
     # Step 2.7: Check background datasets (optional but recommended)
     background_status = check_background_datasets(base_dir)
     
-    # Step 2.8: Check if we have sufficient samples, offer to download more
+    print_success("\nAll environment checks passed!")
+    
+    # Step 3: Get wake word
+    print_header("Wake Word Configuration")
+    wake_word = get_user_input("Enter wake word to train", default="homie")
+    
+    # Step 3.5: Get pronunciation variations
+    if get_yes_no("\nAdd custom pronunciation variations?", default=True):
+        pronunciations = get_pronunciations(wake_word)
+    else:
+        pronunciations = [wake_word]
+        print_info(f"Using single pronunciation: {wake_word}")
+    
+    # Step 4: Test sample generation
+    if get_yes_no("\nGenerate test samples for verification?", default=True):
+        approved_pronunciations = test_sample_generation(wake_word, pronunciations, base_dir)
+        
+        if not approved_pronunciations:
+            print_error("No pronunciations approved!")
+            if not get_yes_no("Continue anyway with original wake word?", default=False):
+                print_info("Training cancelled")
+                sys.exit(0)
+            approved_pronunciations = [wake_word]
+        
+        pronunciations = approved_pronunciations
+    
+    print_success(f"\nUsing {len(pronunciations)} pronunciation(s) for training")
+    
+    # Step 4.5: Download additional AudioSet samples if needed
     audioset_path = base_dir / "audioset_16k"
     audioset_count = len(list(audioset_path.rglob("*.wav"))) if audioset_path.exists() else 0
     
@@ -2403,7 +2433,7 @@ def main():
             if audioset_count < 100:
                 print_warning("Low sample count may result in reduced model quality")
     
-    # Step 2.9: Convert all audio files to 16kHz (AFTER downloading)
+    # Step 4.6: Convert all audio files to 16kHz (AFTER downloading)
     print_header("Audio Sample Rate Verification")
     print_info("Checking and converting background audio files to 16kHz...")
     print_info("This ensures compatibility with training pipeline")
@@ -2425,34 +2455,6 @@ def main():
         print_warning("Some audio files could not be converted to 16kHz")
         if not get_yes_no("Continue anyway? (may cause training errors)", default=True):
             sys.exit(1)
-    
-    print_success("\nAll environment checks passed!")
-    
-    # Step 3: Get wake word
-    print_header("Wake Word Configuration")
-    wake_word = get_user_input("Enter wake word to train", default="homie")
-    
-    # Step 3.5: Get pronunciation variations
-    if get_yes_no("\nAdd custom pronunciation variations?", default=True):
-        pronunciations = get_pronunciations(wake_word)
-    else:
-        pronunciations = [wake_word]
-        print_info(f"Using single pronunciation: {wake_word}")
-    
-    # Step 4: Test sample generation
-    if get_yes_no("\nGenerate test samples for verification?", default=True):
-        approved_pronunciations = test_sample_generation(wake_word, pronunciations, base_dir)
-        
-        if not approved_pronunciations:
-            print_error("No pronunciations approved!")
-            if not get_yes_no("Continue anyway with original wake word?", default=False):
-                print_info("Training cancelled")
-                sys.exit(0)
-            approved_pronunciations = [wake_word]
-        
-        pronunciations = approved_pronunciations
-    
-    print_success(f"\nUsing {len(pronunciations)} pronunciation(s) for training")
     
     # Step 5: Get training parameters
     print_header("Training Parameters")
