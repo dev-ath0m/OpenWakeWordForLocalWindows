@@ -3,12 +3,16 @@
 # Tested on Windows with CUDA 12.4
 
 # ===== Core TTS and Speech Processing =====
-# Note: TTS 0.22+ has GPU inference issues - using 0.21.3 for reliable GPU support
+# Note: Using 0.21.3 with manual GPU forcing for vocoder
 TTS==0.21.3
 piper-tts
 webrtcvad
 pronouncing==0.2.0
 deep-phonemizer==0.0.19
+
+# ===== System Monitoring (for progress bars) =====
+psutil
+pynvml  # NVIDIA GPU monitoring
 
 # ===== PyTorch (CUDA) =====
 # Compatible versions for TTS 0.21.3 - install with CUDA 12.4 support
