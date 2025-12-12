@@ -2378,15 +2378,10 @@ def convert_onnx_to_tflite(onnx_model_path, output_path):
         
         with tempfile.TemporaryDirectory() as tmp_dir:
             # onnx2tf creates output files in a directory
+            # Use minimal parameters - API varies by version
             onnx2tf.convert(
                 input_onnx_file_path=onnx_model_path,
-                output_folder_path=tmp_dir,
-                output_tfjs=False,
-                output_tftrt=False,
-                output_coreml=False,
-                output_edgetpu=False,
-                copy_onnx_input_output_names_to_tflite=True,
-                non_verbose=True  # Suppress verbose output
+                output_folder_path=tmp_dir
             )
             
             # Find the generated tflite file
