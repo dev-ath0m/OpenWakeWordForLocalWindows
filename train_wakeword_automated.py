@@ -1562,17 +1562,12 @@ def _generate_tts_samples_with_model(
     
     # Generate training samples
     samples_per_text = max(1, (n_samples - train_count) // len(texts))
-    print(f"\r{Colors.OKBLUE}[DEBUG] Starting generation loop - target: {model_train_target} training samples{Colors.ENDC}", flush=True)
     for text in texts:
         combo_count = 0
         while train_count < n_samples and combo_count < samples_per_text and model_train_count < model_train_target:
             output_file = output_train_dir / f"{model_short}_{train_count}.wav"
             
             try:
-                # Debug: Show we're attempting generation
-                if model_train_count == 0:
-                    print(f"\r{Colors.OKBLUE}[DEBUG] Generating first sample: '{text[:40]}...'{Colors.ENDC}", flush=True)
-                
                 # Generate with speed variation
                 speed = 1.0 + np.random.uniform(-0.1, 0.1)
                 
@@ -1600,10 +1595,6 @@ def _generate_tts_samples_with_model(
                         tts.tts_to_file(**kwargs)
                         audio, _ = librosa.load(str(temp_file), sr=native_sr, mono=True)
                         temp_file.unlink()
-                
-                # Debug: Show TTS completed
-                if model_train_count == 0:
-                    print(f"\r{Colors.OKBLUE}[DEBUG] TTS generation completed, processing audio...{Colors.ENDC}", flush=True)
                 
                 # Trim silence
                 audio_trimmed, _ = librosa.effects.trim(audio, top_db=30)
@@ -1661,13 +1652,9 @@ def _generate_tts_samples_with_model(
                     'GPU': gpu_usage
                 })
                 pbar.refresh()
-                if output_file.exists():
-                    output_file.unlink()
-                continue
     
     # Generate test samples
     text_idx = 0
-    model_test_count = 0
     test_samples_per_text = max(1, model_test_target // len(texts))
     
     while test_count < n_samples_val and model_test_count < model_test_target and text_idx < len(texts) * 2:
@@ -2794,8 +2781,10 @@ def main():
             if download_script.exists():
                 import subprocess
                 try:
+                    # Pass total target (current + additional) since script downloads from scratch
+                    total_target = current_count + audioset_target
                     result = subprocess.run(
-                        [sys.executable, str(download_script), str(audioset_path), "--max-samples", str(audioset_target)],
+                        [sys.executable, str(download_script), str(audioset_path), "--max-samples", str(total_target)],
                         check=False
                     )
                     
