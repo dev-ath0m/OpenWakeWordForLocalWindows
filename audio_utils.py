@@ -18,22 +18,28 @@ import torchaudio.transforms as T
 def suppress_stderr():
     """Temporarily suppress stderr to hide low-level library errors (mpg123, etc.)
     
-    Windows-compatible version using context redirection instead of file descriptors
+    Uses OS-level file descriptor redirection to catch C library output on Windows
     """
-    import io
+    # Flush Python's stderr buffer first
+    sys.stderr.flush()
     
-    # Save original stderr
-    old_stderr = sys.stderr
+    # Save original stderr file descriptor
+    stderr_fd = sys.stderr.fileno()
+    old_stderr_fd = os.dup(stderr_fd)
+    
+    # Open null device
+    null_file = open(os.devnull, 'w')
     
     try:
-        # Redirect stderr to null
-        sys.stderr = open(os.devnull, 'w')
+        # Redirect stderr file descriptor to null
+        os.dup2(null_file.fileno(), stderr_fd)
         yield
     finally:
-        # Restore stderr and close null file
-        if sys.stderr != old_stderr:
-            sys.stderr.close()
-        sys.stderr = old_stderr
+        # Restore original stderr
+        sys.stderr.flush()
+        os.dup2(old_stderr_fd, stderr_fd)
+        os.close(old_stderr_fd)
+        null_file.close()
 
 
 def check_audio_file(audio_file):
@@ -51,6 +57,8 @@ def check_audio_file(audio_file):
         with suppress_stderr():
             _, sr = torchaudio.load(str(audio_file))
         return (audio_file, sr, None)
+    except KeyboardInterrupt:
+        raise
     except Exception as e:
         return (audio_file, None, str(e)[:100])
 
@@ -129,7 +137,9 @@ def scan_and_convert_audio_files(
             futures = {executor.submit(check_audio_file, f): f for f in audio_files}
             
             if show_progress:
-                pbar = tqdm(total=len(audio_files), desc="Scanning", unit="files")
+                # Use sys.stdout explicitly and disable mininterval for responsive updates
+                pbar = tqdm(total=len(audio_files), desc="Scanning", unit="files", 
+                           file=sys.stdout, mininterval=0.5, dynamic_ncols=True)
             
             try:
                 for future in as_completed(futures):
@@ -148,6 +158,7 @@ def scan_and_convert_audio_files(
                             failed_pct = (len(corrupted_files) / scanned * 100) if scanned > 0 else 0
                             pbar.set_postfix({'Failed': f'{len(corrupted_files)} ({failed_pct:.1f}%)'})
                         pbar.update(1)
+                        pbar.refresh()  # Force refresh
             except KeyboardInterrupt:
                 if show_progress:
                     pbar.close()
@@ -194,7 +205,8 @@ def scan_and_convert_audio_files(
                 futures = {executor.submit(resample_audio_file, (f, target_sr)): f for f, _ in files_to_convert}
                 
                 if show_progress:
-                    pbar = tqdm(total=len(files_to_convert), desc="Converting", unit="files")
+                    pbar = tqdm(total=len(files_to_convert), desc="Converting", unit="files",
+                               file=sys.stdout, mininterval=0.5, dynamic_ncols=True)
                 
                 try:
                     for future in as_completed(futures):
@@ -207,6 +219,7 @@ def scan_and_convert_audio_files(
                         
                         if show_progress:
                             pbar.update(1)
+                            pbar.refresh()  # Force refresh
                 except KeyboardInterrupt:
                     if show_progress:
                         pbar.close()
