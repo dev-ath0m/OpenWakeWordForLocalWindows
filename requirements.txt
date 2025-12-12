@@ -11,10 +11,11 @@ pronouncing==0.2.0
 deep-phonemizer==0.0.19
 
 # ===== PyTorch (CUDA) =====
-# Install separately with: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
-torch>=2.0.0
-torchvision
-torchaudio
+# Compatible versions for TTS 0.21.3 - install with CUDA 12.4 support
+# Install with: pip install torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0+cu124 --index-url https://download.pytorch.org/whl/cu124
+torch==2.6.0
+torchvision==0.21.0
+torchaudio==2.6.0
 
 # ===== Audio Processing and Augmentation =====
 audiomentations==0.33.0
@@ -22,15 +23,18 @@ torch-audiomentations==0.11.0
 acoustics==0.2.6
 speechbrain==0.5.14
 mutagen==1.47.0
-librosa
+librosa==0.10.2.post1
 soundfile
 resampy
 pydub
+soxr==0.5.0
 
 # ===== Scientific Computing =====
-numpy<2.0,>=1.21
+numpy==1.26.4
 scipy>=1.13,<1.17
 pandas
+networkx==2.8.8
+fsspec==2023.10.0
 
 # ===== Machine Learning and Training =====
 torchinfo==1.8.0
