@@ -1418,15 +1418,17 @@ def _generate_tts_samples_with_model(
     print_info(f"Starting generation with {len(texts)} text variant(s)...")
     print_info(f"Native TTS sample rate: {native_sr}Hz → Resampling to 16kHz")
     
-    # Setup progress bar
+    # Setup progress bar (show only this model's target, not global total)
     need_resample = (native_sr != 16000)
     gender = model_config.get("gender", "voice")
     speaker = model_config.get("speaker", "")
     speaker_suffix = f"_{speaker}_{gender}" if speaker else f"_{gender}"
     model_desc = f"{model_short}{speaker_suffix}"
-    total_target = n_samples + n_samples_val
-    pbar = tqdm(total=total_target, desc=f"{sample_type} ({model_desc})", 
-               unit="samples", initial=train_count + test_count,
+    
+    # Calculate this model's contribution to the total (not the global total)
+    model_total_target = model_train_target + model_test_target
+    pbar = tqdm(total=model_total_target, desc=f"{sample_type} ({model_desc})", 
+               unit="samples", initial=0,  # Start at 0 for this model
                file=sys.stdout, mininterval=0.5, dynamic_ncols=True,
                bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]')
     
@@ -1499,14 +1501,13 @@ def _generate_tts_samples_with_model(
                 combo_count += 1
                 
                 # Update progress only every N samples to reduce overhead
-                if train_count % progress_update_interval == 0:
+                if model_train_count % progress_update_interval == 0:
                     cpu_usage, gpu_usage = _get_process_usage()
                     text_display = text[:30] + '...' if len(text) > 30 else text
-                    total_valid = train_count + test_count
-                    pbar.n = total_valid
+                    pbar.n = model_train_count + model_test_count
                     pbar.set_postfix({
-                        'Train': train_count,
-                        'Test': test_count,
+                        'Train': model_train_count,
+                        'Test': model_test_count,
                         'Failed': failed_count,
                         'CPU': f'{cpu_usage:.0f}%',
                         'GPU': gpu_usage,
@@ -1587,12 +1588,11 @@ def _generate_tts_samples_with_model(
             
             # Update progress bar
             cpu_usage, gpu_usage = _get_process_usage()
-            total_valid = train_count + test_count
             var_display = text if len(text) <= 15 else text[:12] + '...'
-            pbar.n = total_valid
+            pbar.n = model_train_count + model_test_count
             pbar.set_postfix({
-                'Train': train_count,
-                'Test': test_count,
+                'Train': model_train_count,
+                'Test': model_test_count,
                 'Failed': failed_count,
                 'CPU': f'{cpu_usage:.0f}%',
                 'GPU': gpu_usage,
@@ -1619,14 +1619,13 @@ def _generate_tts_samples_with_model(
     # Close progress bar
     pbar.close()
     
-    # Report completion
-    total_valid = train_count + test_count
+    # Report completion using model-specific counts
     if failed_count > 0:
-        total_attempts = total_valid + failed_count
+        total_attempts = model_train_count + model_test_count + failed_count
         fail_pct = (failed_count / total_attempts * 100) if total_attempts > 0 else 0
-        print_success(f"Completed model '{model_short}': {train_count} train + {test_count} test, {failed_count} failed ({fail_pct:.1f}%)")
+        print_success(f"Completed model '{model_short}': {model_train_count} train + {model_test_count} test, {failed_count} failed ({fail_pct:.1f}%)")
     else:
-        print_success(f"Completed model '{model_short}': {train_count} train + {test_count} test")
+        print_success(f"Completed model '{model_short}': {model_train_count} train + {model_test_count} test")
     
     return train_count, test_count, failed_count
 
