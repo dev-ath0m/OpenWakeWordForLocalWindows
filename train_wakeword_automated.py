@@ -1662,6 +1662,13 @@ def _generate_negative_samples(wake_word: str, n_samples: int, base_dir: Path) -
                     print_warning(f"Model {model_short}{speaker_suffix} failed - continuing with remaining models")
                     continue  # Try next speaker/model
                 
+                # Initialize progress bar for this model
+                from tqdm import tqdm
+                model_desc = f"{model_short}{speaker_suffix}"
+                pbar = tqdm(total=n_samples, desc=f"Generating negatives ({model_desc})", 
+                           unit="samples", initial=valid_count,
+                           bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]')
+                
                 try:
                     # Cycle through adversarial texts
                     for i, text in enumerate(adversarial_texts):
@@ -1705,11 +1712,12 @@ def _generate_negative_samples(wake_word: str, n_samples: int, base_dir: Path) -
                             wavfile.write(str(output_file), 16000, audio)
                             valid_count += 1
                             
-                            # Show progress
-                            if valid_count % 50 == 0 or valid_count == n_samples:
-                                progress_pct = (valid_count / n_samples) * 100
-                                fail_pct = (failed_count / (valid_count + failed_count) * 100) if (valid_count + failed_count) > 0 else 0
-                                print_info(f"Progress: {valid_count}/{n_samples} ({progress_pct:.1f}%) | Failed: {fail_pct:.1f}%")
+                            # Update progress bar
+                            total_attempts = valid_count + failed_count
+                            fail_pct = (failed_count / total_attempts * 100) if total_attempts > 0 else 0
+                            pbar.n = valid_count
+                            pbar.set_postfix({'Failed': f'{fail_pct:.1f}%', 'Text': f"'{text[:15]}...'"})
+                            pbar.refresh()
                             
                         except Exception as e:
                             failed_count += 1
@@ -1719,9 +1727,15 @@ def _generate_negative_samples(wake_word: str, n_samples: int, base_dir: Path) -
                     
                     if valid_count >= n_samples:
                         break
+                    
+                    # Close progress bar
+                    pbar.close()
                         
                 except Exception as model_error:
                     # Model-level error (not individual sample error)
+                    # Close progress bar on error
+                    if 'pbar' in locals():
+                        pbar.close()
                     print_error(f"Critical error with model {model_short}{speaker_suffix}: {model_error}")
                     import traceback
                     traceback.print_exc()
