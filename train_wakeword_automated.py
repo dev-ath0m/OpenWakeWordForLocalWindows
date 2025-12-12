@@ -1097,13 +1097,16 @@ def generate_samples(wake_word: str, pronunciations: list, n_samples: int, base_
     print_info("Using built-in multi-model TTS generator")
     print_info("Models will be downloaded and cached in 'tts/' folder automatically")
     
+    # Calculate validation samples (10% of training samples)
+    n_samples_val = max(1, n_samples // 10)
+    
     # Generate both positive and negative samples
-    positive_success = _generate_positive_samples(wake_word, pronunciations, n_samples, clips_dir, base_dir)
+    positive_success = _generate_positive_samples(wake_word, pronunciations, n_samples, n_samples_val, base_dir)
     if not positive_success:
         print_error("Positive sample generation failed - cannot continue")
         return False
     
-    negative_success = _generate_negative_samples(wake_word, n_samples, base_dir)
+    negative_success = _generate_negative_samples(wake_word, n_samples, n_samples_val, base_dir)
     if not negative_success:
         print_error("Negative sample generation failed - cannot continue")
         print_error("Training requires both positive and negative samples")
@@ -1249,11 +1252,16 @@ def _setup_tts_environment(base_dir: Path):
     return device
 
 
-def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: int, clips_dir: Path, base_dir: Path) -> bool:
+def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: int, n_samples_val: int, base_dir: Path) -> bool:
     """Generate positive samples (wake word pronunciations) using TTS"""
     print_header("Generating Positive Samples")
     
     model_name = wake_word.lower().replace(' ', '_')
+    output_dir = base_dir / "trained_models" / model_name
+    positive_train_dir = output_dir / "positive_train"
+    positive_test_dir = output_dir / "positive_test"
+    positive_train_dir.mkdir(parents=True, exist_ok=True)
+    positive_test_dir.mkdir(parents=True, exist_ok=True)
     
     try:
         from TTS.api import TTS
@@ -1268,12 +1276,13 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
         samples_per_combo = max(1, samples_per_model // len(pronunciations))
         
         print_info(f"Using {len(tts_models)} TTS models with {len(pronunciations)} pronunciations")
-        print_info(f"Target: {n_samples} samples total")
+        print_info(f"Target: {n_samples} training samples + {n_samples_val} test samples")
         print_info(f"Generating ~{samples_per_combo} samples per model/variation combination")
         print_info(f"Device: {device.upper()}")
         print_info("Starting sample generation...\n")
         
-        valid_count = 0
+        train_count = 0
+        test_count = 0
         failed_count = 0
         
         for model_config in tts_models:
@@ -1354,42 +1363,12 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                            unit="samples", bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]')
                 
                 for variation in pronunciations:
-                    # Create subfolder for this model/variation
-                    gender = model_config.get("gender", "voice")
-                    speaker = model_config.get("speaker", "")
-                    speaker_suffix = f"_{speaker}" if speaker else ""
-                    subfolder = clips_dir / f"{model_short}{speaker_suffix}_{gender}" / variation.replace(" ", "_")
-                    subfolder.mkdir(parents=True, exist_ok=True)
-                    
-                    # Generate samples for this combination
+                    # Generate training samples
                     combo_count = 0
-                    while valid_count < n_samples and combo_count < samples_per_combo + 10:
-                        output_file = subfolder / f"{model_name}_{valid_count}.wav"
+                    while train_count < n_samples and combo_count < samples_per_combo:
+                        output_file = positive_train_dir / f"{model_short}_{train_count}.wav"
                         
                         try:
-                            # Show warmup message on first generation
-                            if first_generation:
-                                print_info(f"Preparing first generation for '{variation}'...")
-                                # Start warmup spinner
-                                warmup_done = threading.Event()
-                                def warmup_spinner():
-                                    spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
-                                    idx = 0
-                                    start_time = time_module.time()
-                                    while not warmup_done.is_set():
-                                        elapsed = time_module.time() - start_time
-                                        print(f"\r{Colors.OKCYAN}  {spinner_chars[idx]} Warming up model (first generation)... (elapsed: {int(elapsed)}s){Colors.ENDC}", 
-                                              end='', flush=True)
-                                        idx = (idx + 1) % len(spinner_chars)
-                                        time_module.sleep(0.1)
-                                    # Clear spinner line
-                                    print("\r" + " " * 80 + "\r", end='', flush=True)
-                                
-                                warmup_thread = threading.Thread(target=warmup_spinner)
-                                warmup_thread.daemon = True
-                                warmup_thread.start()
-                                first_generation = False
-                            
                             # Generate with speed variation
                             speed = 1.0 + np.random.uniform(-0.1, 0.1)
                             
@@ -1405,38 +1384,25 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                                 kwargs['language'] = model_config['language']
                             
                             # Generate sample with suppressed output
-                            try:
-                                with _SuppressOutput(log_file_path=tts_log_path):
-                                    tts.tts_to_file(**kwargs)
-                            except Exception as gen_error:
-                                # Log generation errors for debugging
-                                import logging as log
-                                log.warning(f"TTS generation error for '{variation}': {gen_error}")
-                                raise
-                            finally:
-                                # Stop warmup spinner if it was running
-                                if 'warmup_done' in locals():
-                                    warmup_done.set()
-                                    warmup_thread.join(timeout=0.5)
+                            with _SuppressOutput():
+                                tts.tts_to_file(**kwargs)
                             
                             # Process and validate audio
                             if _process_audio_sample(output_file):
-                                valid_count += 1
+                                train_count += 1
                                 combo_count += 1
                             else:
                                 failed_count += 1
                                 combo_count += 1
                                 continue
                             
-                            # Update progress bar with tqdm
-                            total_attempts = valid_count + failed_count
-                            fail_pct = (failed_count / total_attempts * 100) if total_attempts > 0 else 0
-                            var_display = variation if len(variation) <= 20 else variation[:17] + '...'
-                            
-                            pbar.n = valid_count
+                            # Update progress bar
+                            total_valid = train_count + test_count
+                            pbar.n = total_valid
                             pbar.set_postfix({
-                                'Failed': f'{fail_pct:.1f}%',
-                                'Current': f"'{var_display}' ({model_short})"
+                                'Train': train_count,
+                                'Test': test_count,
+                                'Failed': failed_count
                             })
                             pbar.refresh()
                                 
@@ -1447,15 +1413,67 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                                 output_file.unlink()
                             continue
                     
-                    if valid_count >= n_samples:
+                    # Generate test samples
+                    combo_test_count = 0
+                    test_samples_per_combo = max(1, n_samples_val // (len(tts_models) * len(pronunciations)))
+                    while test_count < n_samples_val and combo_test_count < test_samples_per_combo:
+                        output_file = positive_test_dir / f"{model_short}_test_{test_count}.wav"
+                        
+                        try:
+                            # Generate with speed variation
+                            speed = 1.0 + np.random.uniform(-0.1, 0.1)
+                            
+                            kwargs = {
+                                'text': variation,
+                                'file_path': str(output_file),
+                                'speed': speed
+                            }
+                            
+                            if 'speaker' in model_config:
+                                kwargs['speaker'] = model_config['speaker']
+                            if 'language' in model_config:
+                                kwargs['language'] = model_config['language']
+                            
+                            # Generate sample with suppressed output
+                            with _SuppressOutput():
+                                tts.tts_to_file(**kwargs)
+                            
+                            # Process and validate audio
+                            if _process_audio_sample(output_file):
+                                test_count += 1
+                                combo_test_count += 1
+                            else:
+                                failed_count += 1
+                                combo_test_count += 1
+                                continue
+                            
+                            # Update progress bar
+                            total_valid = train_count + test_count
+                            pbar.n = total_valid
+                            pbar.set_postfix({
+                                'Train': train_count,
+                                'Test': test_count,
+                                'Failed': failed_count
+                            })
+                            pbar.refresh()
+                                
+                        except Exception:
+                            failed_count += 1
+                            combo_test_count += 1
+                            if output_file.exists():
+                                output_file.unlink()
+                            continue
+                    
+                    if train_count >= n_samples and test_count >= n_samples_val:
                         break
                 
                 # Close progress bar
                 pbar.close()
                 
-                total_attempts = valid_count + failed_count
+                total_valid = train_count + test_count
+                total_attempts = total_valid + failed_count
                 fail_pct = (failed_count / total_attempts * 100) if total_attempts > 0 else 0
-                print_success(f"Completed model '{model_short}': {valid_count} valid samples, {failed_count} failed ({fail_pct:.1f}%)")
+                print_success(f"Completed model '{model_short}': {train_count} train + {test_count} test, {failed_count} failed ({fail_pct:.1f}%)")
                         
             except Exception as e:
                 # Close progress bar on error if it exists
@@ -1464,33 +1482,37 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                 print_warning(f"Model {model_short} failed: {e}")
                 continue
             
-            if valid_count >= n_samples:
+            if train_count >= n_samples and test_count >= n_samples_val:
                 break
         
-        print_success(f"\nGenerated {valid_count} valid positive samples")
-        total_attempts = valid_count + failed_count
+        print_success(f"\nGenerated {train_count} training samples and {test_count} test samples")
+        total_valid = train_count + test_count
+        total_attempts = total_valid + failed_count
         if failed_count > 0:
             fail_pct = (failed_count / total_attempts * 100)
             print_info(f"Total attempts: {total_attempts} (Success rate: {100-fail_pct:.1f}%)")
         print_info(f"TTS models cached in: {base_dir / 'tts'}")
-        return valid_count > 0
+        return train_count > 0 and test_count > 0
         
     except Exception as e:
         print_error(f"Positive sample generation failed: {e}")
         return False
 
 
-def _generate_negative_samples(wake_word: str, n_samples: int, base_dir: Path) -> bool:
+def _generate_negative_samples(wake_word: str, n_samples: int, n_samples_val: int, base_dir: Path) -> bool:
     """Generate negative samples (phonetically similar non-wake-words) using TTS as Piper replacement"""
     print_header("Generating Negative Samples")
     
     model_name = wake_word.lower().replace(' ', '_')
     output_dir = base_dir / "trained_models" / model_name
     negative_train_dir = output_dir / "negative_train"
+    negative_test_dir = output_dir / "negative_test"
     negative_train_dir.mkdir(parents=True, exist_ok=True)
+    negative_test_dir.mkdir(parents=True, exist_ok=True)
     
     print_info("Generating phonetically similar adversarial phrases")
     print_info("These teach the model what NOT to trigger on")
+    print_info(f"Target: {n_samples} training samples + {n_samples_val} test samples")
     
     try:
         # Import OpenWakeWord's adversarial text generator
@@ -1551,7 +1573,8 @@ def _generate_negative_samples(wake_word: str, n_samples: int, base_dir: Path) -
         # Use the same TTS models as positive sample generation
         tts_models_config = _get_tts_models_config()
         
-        valid_count = 0
+        train_count = 0
+        test_count = 0
         failed_count = 0
         
         # Generate samples using each model configuration
@@ -1559,7 +1582,7 @@ def _generate_negative_samples(wake_word: str, n_samples: int, base_dir: Path) -
         import time as time_module
         
         for model_config in tts_models_config:
-            if valid_count >= n_samples:
+            if train_count >= n_samples and test_count >= n_samples_val:
                 break
             
             model_name = model_config["model"]
@@ -1618,17 +1641,19 @@ def _generate_negative_samples(wake_word: str, n_samples: int, base_dir: Path) -
                 speaker = model_config.get("speaker", "")
                 speaker_suffix = f"_{speaker}_{gender}" if speaker else f"_{gender}"
                 model_desc = f"{model_short}{speaker_suffix}"
-                pbar = tqdm(total=n_samples, desc=f"Generating negatives ({model_desc})", 
-                           unit="samples", initial=valid_count,
+                total_target = n_samples + n_samples_val
+                pbar = tqdm(total=total_target, desc=f"Generating negatives ({model_desc})", 
+                           unit="samples", initial=train_count + test_count,
                            bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]')
                 
                 try:
-                    # Cycle through adversarial texts
-                    for text in adversarial_texts:
-                        if valid_count >= n_samples:
-                            break
+                    # Cycle through adversarial texts for training samples
+                    text_idx = 0
+                    while train_count < n_samples and text_idx < len(adversarial_texts):
+                        text = adversarial_texts[text_idx % len(adversarial_texts)]
+                        text_idx += 1
                         
-                        output_file = negative_train_dir / f"neg_{valid_count}.wav"
+                        output_file = negative_train_dir / f"neg_{train_count}.wav"
                         
                         try:
                             # Generate with speed variation (matching positive samples)
@@ -1652,20 +1677,18 @@ def _generate_negative_samples(wake_word: str, n_samples: int, base_dir: Path) -
                             
                             # Process and validate audio using shared helper
                             if _process_audio_sample(output_file):
-                                valid_count += 1
+                                train_count += 1
                             else:
                                 failed_count += 1
                                 continue
                             
                             # Update progress bar
-                            total_attempts = valid_count + failed_count
-                            fail_pct = (failed_count / total_attempts * 100) if total_attempts > 0 else 0
-                            text_display = text if len(text) <= 15 else text[:12] + '...'
-                            
-                            pbar.n = valid_count
+                            total_valid = train_count + test_count
+                            pbar.n = total_valid
                             pbar.set_postfix({
-                                'Failed': f'{fail_pct:.1f}%',
-                                'Text': f"'{text_display}'"
+                                'Train': train_count,
+                                'Test': test_count,
+                                'Failed': failed_count
                             })
                             pbar.refresh()
                             
@@ -1674,6 +1697,60 @@ def _generate_negative_samples(wake_word: str, n_samples: int, base_dir: Path) -
                             if output_file.exists():
                                 output_file.unlink()
                             continue
+                    
+                    # Generate test samples
+                    text_idx = 0
+                    while test_count < n_samples_val and text_idx < len(adversarial_texts) * 2:
+                        text = adversarial_texts[text_idx % len(adversarial_texts)]
+                        text_idx += 1
+                        
+                        output_file = negative_test_dir / f"neg_test_{test_count}.wav"
+                        
+                        try:
+                            # Generate with speed variation (matching positive samples)
+                            speed = 1.0 + np.random.uniform(-0.1, 0.1)
+                            
+                            # Build kwargs using model_config (same as positive samples)
+                            kwargs = {
+                                'text': text,
+                                'file_path': str(output_file),
+                                'speed': speed
+                            }
+                            
+                            if 'speaker' in model_config:
+                                kwargs['speaker'] = model_config['speaker']
+                            if 'language' in model_config:
+                                kwargs['language'] = model_config['language']
+                            
+                            # Generate sample with suppressed output
+                            with _SuppressOutput():
+                                tts.tts_to_file(**kwargs)
+                            
+                            # Process and validate audio using shared helper
+                            if _process_audio_sample(output_file):
+                                test_count += 1
+                            else:
+                                failed_count += 1
+                                continue
+                            
+                            # Update progress bar
+                            total_valid = train_count + test_count
+                            pbar.n = total_valid
+                            pbar.set_postfix({
+                                'Train': train_count,
+                                'Test': test_count,
+                                'Failed': failed_count
+                            })
+                            pbar.refresh()
+                            
+                        except Exception:
+                            failed_count += 1
+                            if output_file.exists():
+                                output_file.unlink()
+                            continue
+                    
+                    if train_count >= n_samples and test_count >= n_samples_val:
+                        break
                     
                     # Close progress bar
                     pbar.close()
@@ -1693,22 +1770,24 @@ def _generate_negative_samples(wake_word: str, n_samples: int, base_dir: Path) -
                 print_warning(f"Model {model_short} failed to load: {e}")
                 continue
             
-            if valid_count >= n_samples:
+            if train_count >= n_samples and test_count >= n_samples_val:
                 break
         
         # Final validation - require at least 80% of target samples (allow some model failures)
-        if valid_count < n_samples * 0.8:
-            print_error(f"\nInsufficient negative samples generated: {valid_count}/{n_samples}")
+        total_valid = train_count + test_count
+        total_target = n_samples + n_samples_val
+        if total_valid < total_target * 0.8:
+            print_error(f"\nInsufficient negative samples generated: {train_count} train + {test_count} test / {total_target} target")
             print_error("Training requires at least 80% of target samples")
-            print_error("Try clearing TTS cache (rmdir /s /q tts) and running again")
             return False
         
-        print_success(f"\nGenerated {valid_count} negative samples in {negative_train_dir}")
+        print_success(f"\nGenerated {train_count} training samples and {test_count} test samples")
         if failed_count > 0:
-            print_info(f"Failed: {failed_count} samples ({failed_count/(valid_count+failed_count)*100:.1f}%)")
+            total_attempts = total_valid + failed_count
+            print_info(f"Failed: {failed_count} samples ({failed_count/total_attempts*100:.1f}%)")
         
-        if valid_count < n_samples:
-            print_warning(f"Generated {valid_count}/{n_samples} samples (some models may have failed)")
+        if train_count < n_samples or test_count < n_samples_val:
+            print_warning(f"Generated {train_count}/{n_samples} train + {test_count}/{n_samples_val} test (some models may have failed)")
         
         return True
         
