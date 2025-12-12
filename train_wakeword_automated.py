@@ -2301,9 +2301,206 @@ def _generate_negative_samples(wake_word: str, n_samples: int, n_samples_val: in
         return False
 
 
+def _patch_openwakeword_train_py(base_dir: Path) -> bool:
+    """Apply runtime patches to OpenWakeWord's train.py for compatibility fixes.
+    
+    Patches:
+    1. Fix TFLite conversion for TensorFlow 2.16+ (use onnx2tf instead of onnx-tf)
+    2. Fix Windows file locking in trim_mmap function
+    
+    Returns:
+        True if patching succeeded, False otherwise
+    """
+    train_py_path = base_dir / "openwakeword" / "openwakeword" / "train.py"
+    data_py_path = base_dir / "openwakeword" / "openwakeword" / "data.py"
+    
+    if not train_py_path.exists():
+        print_error(f"Cannot patch: {train_py_path} not found")
+        return False
+    
+    if not data_py_path.exists():
+        print_error(f"Cannot patch: {data_py_path} not found")
+        return False
+    
+    try:
+        # Read train.py
+        with open(train_py_path, 'r', encoding='utf-8') as f:
+            train_content = f.read()
+        
+        # Read data.py
+        with open(data_py_path, 'r', encoding='utf-8') as f:
+            data_content = f.read()
+        
+        # Check if patches already applied
+        if 'onnx2tf' in train_content and 'explicit close + gc' in data_content:
+            return True  # Already patched
+        
+        print_info("Applying compatibility patches to OpenWakeWord...")
+        
+        # Patch 1: Fix TFLite conversion in train.py
+        old_convert_func = '''# Separate function to convert onnx models to tflite format
+def convert_onnx_to_tflite(onnx_model_path, output_path):
+    """Converts an ONNX version of an openwakeword model to the Tensorflow tflite format."""
+    # imports
+    import onnx
+    from onnx_tf.backend import prepare
+    import tensorflow as tf
+
+    # Convert to tflite from onnx model
+    onnx_model = onnx.load(onnx_model_path)
+    tf_rep = prepare(onnx_model, device="CPU")
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tf_rep.export_graph(os.path.join(tmp_dir, "tf_model"))
+        converter = tf.lite.TFLiteConverter.from_saved_model(os.path.join(tmp_dir, "tf_model"))
+        tflite_model = converter.convert()
+
+        logging.info(f"####\\nSaving tflite mode to '{output_path}'")
+        with open(output_path, 'wb') as f:
+            f.write(tflite_model)
+
+    return None'''
+        
+        new_convert_func = '''# Separate function to convert onnx models to tflite format
+def convert_onnx_to_tflite(onnx_model_path, output_path):
+    """Converts an ONNX version of an openwakeword model to the Tensorflow tflite format.
+    
+    Uses onnx2tf for conversion (compatible with TensorFlow 2.16+).
+    Falls back to onnx-tf if onnx2tf fails (requires TF 2.12-2.14).
+    """
+    import tensorflow as tf
+    
+    # Try onnx2tf first (compatible with TF 2.16+)
+    try:
+        import onnx2tf
+        import shutil
+        
+        logging.info(f"Converting {os.path.basename(onnx_model_path)} to TFLite using onnx2tf...")
+        
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            # onnx2tf creates output files in a directory
+            onnx2tf.convert(
+                input_onnx_file_path=onnx_model_path,
+                output_folder_path=tmp_dir,
+                output_tfjs=False,
+                output_tftrt=False,
+                output_coreml=False,
+                output_edgetpu=False,
+                copy_onnx_input_output_names_to_tflite=True,
+                non_verbose=True  # Suppress verbose output
+            )
+            
+            # Find the generated tflite file
+            import glob
+            tflite_files = glob.glob(os.path.join(tmp_dir, '*.tflite'))
+            if tflite_files:
+                shutil.copy(tflite_files[0], output_path)
+                logging.info(f"####\\nSaving tflite model to '{output_path}'")
+                return None
+            else:
+                raise RuntimeError("onnx2tf did not generate a TFLite file")
+                
+    except Exception as e:
+        logging.warning(f"onnx2tf conversion failed: {e}")
+        logging.info("Attempting fallback to onnx-tf (requires TensorFlow 2.12-2.14)...")
+        
+        # Fallback to onnx-tf (only works with TF 2.12-2.14)
+        try:
+            import onnx
+            from onnx_tf.backend import prepare
+            
+            onnx_model = onnx.load(onnx_model_path)
+            tf_rep = prepare(onnx_model, device="CPU")
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                tf_rep.export_graph(os.path.join(tmp_dir, "tf_model"))
+                converter = tf.lite.TFLiteConverter.from_saved_model(os.path.join(tmp_dir, "tf_model"))
+                tflite_model = converter.convert()
+
+                logging.info(f"####\\nSaving tflite model to '{output_path}'")
+                with open(output_path, 'wb') as f:
+                    f.write(tflite_model)
+                    
+        except Exception as fallback_error:
+            logging.error(f"Both onnx2tf and onnx-tf conversion failed.")
+            logging.error(f"onnx-tf error: {fallback_error}")
+            logging.info("TFLite conversion requires either:")
+            logging.info("  - onnx2tf with TensorFlow 2.16+ (pip install onnx2tf)")
+            logging.info("  - onnx-tf with TensorFlow 2.12-2.14 (pip install onnx-tf)")
+            raise RuntimeError("TFLite conversion failed with all methods") from fallback_error
+
+    return None'''
+        
+        if old_convert_func in train_content:
+            train_content = train_content.replace(old_convert_func, new_convert_func)
+            print_success("  ✓ Patched TFLite conversion for TensorFlow 2.16 compatibility")
+        else:
+            print_warning("  ! TFLite conversion function not found (may already be patched)")
+        
+        # Patch 2: Fix Windows file locking in data.py
+        old_trim_code = '''    # Close memory-mapped files before deleting (Windows requires this)
+    del mmap_file1
+    del mmap_file2
+    import gc
+    gc.collect()
+    
+    # Remove old mmaped file
+    os.remove(mmap_path)'''
+        
+        new_trim_code = '''    # Close memory-mapped files before deleting (Windows requires explicit close + gc)
+    if hasattr(mmap_file1, '_mmap'):
+        mmap_file1._mmap.close()
+    if hasattr(mmap_file2, '_mmap'):
+        mmap_file2._mmap.close()
+    del mmap_file1
+    del mmap_file2
+    import gc
+    gc.collect()
+    
+    # Windows file locking: retry with delays
+    import time
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            os.remove(mmap_path)
+            break
+        except PermissionError:
+            if attempt < max_retries - 1:
+                time.sleep(0.5)  # Wait for file handle to release
+                gc.collect()  # Force garbage collection again
+            else:
+                raise  # Re-raise on final attempt'''
+        
+        if old_trim_code in data_content:
+            data_content = data_content.replace(old_trim_code, new_trim_code)
+            print_success("  ✓ Patched Windows file locking in trim_mmap")
+        else:
+            print_warning("  ! File locking code not found (may already be patched)")
+        
+        # Write patched files
+        with open(train_py_path, 'w', encoding='utf-8') as f:
+            f.write(train_content)
+        
+        with open(data_py_path, 'w', encoding='utf-8') as f:
+            f.write(data_content)
+        
+        print_success("OpenWakeWord compatibility patches applied successfully")
+        return True
+        
+    except Exception as e:
+        print_error(f"Failed to patch OpenWakeWord: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 def augment_samples(config_file: Path, base_dir: Path) -> bool:
     """Augment samples with background noise and room impulse responses"""
     print_header("Augmenting Samples")
+    
+    # Apply compatibility patches to OpenWakeWord
+    if not _patch_openwakeword_train_py(base_dir):
+        print_error("Failed to apply OpenWakeWord patches")
+        return False
+    
     print_info("Applying audio augmentation (noise, music, reverb)")
     print_info("This may take several minutes...")
     
@@ -2328,6 +2525,11 @@ def augment_samples(config_file: Path, base_dir: Path) -> bool:
 def train_model(config_file: Path, base_dir: Path) -> bool:
     """Train the wake word model with progress monitoring"""
     print_header("Training Model")
+    
+    # Apply compatibility patches to OpenWakeWord
+    if not _patch_openwakeword_train_py(base_dir):
+        print_error("Failed to apply OpenWakeWord patches")
+        return False
     
     print_info("Starting model training")
     print_info("This may take 30 minutes to several hours depending on settings...")
