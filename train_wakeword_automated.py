@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 import json
 import psutil
+import importlib.util
 
 # Color codes for terminal output
 class Colors:
@@ -2100,10 +2101,33 @@ def print_summary(wake_word: str, model_dir: Path, onnx_file: Optional[Path],
         print(f"\n{Colors.OKCYAN}Copy command for Home Assistant:{Colors.ENDC}")
         print(f"  Copy-Item \"{onnx_file}\" \"\\\\homeassistant\\config\\custom_wakewords\\{wake_word}.onnx\"")
 
+def check_onnx_models():
+    """Verify ONNX models exist (should be downloaded by setup script)"""
+    models_dir = Path("openwakeword/openwakeword/resources/models")
+    melspec_path = models_dir / "melspectrogram.onnx"
+    embedding_path = models_dir / "embedding_model.onnx"
+    
+    # Check if both models exist
+    if not melspec_path.exists() or not embedding_path.exists():
+        print_error("ONNX models not found!")
+        print_error("Please run SETUP_COMPLETE.ps1 first to download the models.")
+        print_error(f"Expected location: {models_dir.absolute()}")
+        sys.exit(1)
+    
+    # Models exist, show info
+    mel_size = melspec_path.stat().st_size / (1024*1024)
+    emb_size = embedding_path.stat().st_size / (1024*1024)
+    print_info(f"ONNX models verified:")
+    print_info(f"  melspectrogram.onnx ({mel_size:.2f} MB)")
+    print_info(f"  embedding_model.onnx ({emb_size:.2f} MB)")
+
 def main():
     """Main automated workflow"""
     print_header("Automated Wake Word Training Workflow")
     print(f"{Colors.BOLD}OpenWakeWord Custom Training System{Colors.ENDC}\n")
+    
+    # Verify ONNX models exist (downloaded by setup script)
+    check_onnx_models()
     
     # Get base directory
     base_dir = Path(__file__).parent.resolve()

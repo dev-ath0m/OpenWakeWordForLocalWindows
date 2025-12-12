@@ -301,53 +301,41 @@ if (-not (Test-Path $validationFile)) {
     Write-Host "  [OK] Validation features already present" -ForegroundColor Green
 }
 
-# Download OpenWakeWord ONNX models
+# Download OpenWakeWord ONNX models from official GitHub release
 Write-Host "`nDownloading OpenWakeWord ONNX models..." -ForegroundColor Yellow
 
 $modelsDir = "openwakeword\openwakeword\resources\models"
-if (-not (Test-Path $modelsDir)) {
+$melspecPath = "$modelsDir\melspectrogram.onnx"
+$embeddingPath = "$modelsDir\embedding_model.onnx"
+
+# Create models directory if it doesn't exist
+if (!(Test-Path $modelsDir)) {
     New-Item -ItemType Directory -Path $modelsDir -Force | Out-Null
 }
 
-$onnxModels = @(
-    @{
-        Name = "melspectrogram.onnx"
-        Url = "https://huggingface.co/benjamin-paine/hey-buddy/resolve/f28f79efa440946f0dd35da4810dcd5b9cbf8e5e/melspectrogram.onnx"
-        Path = "$modelsDir\melspectrogram.onnx"
-        Size = "~1MB"
-    },
-    @{
-        Name = "embedding_model.onnx"
-        Url = "https://huggingface.co/cloud-ml/distiluse-base-multilingual-cased-v1-onnx/resolve/f2b6a82a0a8636d3cd9c5218104b6dc8e523ef8d/embedding_model.onnx"
-        Path = "$modelsDir\embedding_model.onnx"
-        Size = "~516MB"
-    }
-)
+$baseUrl = "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1"
+$models = @{
+    "melspectrogram.onnx" = "$baseUrl/melspectrogram.onnx"
+    "embedding_model.onnx" = "$baseUrl/embedding_model.onnx"
+}
 
-foreach ($model in $onnxModels) {
-    if (-not (Test-Path $model.Path)) {
-        Write-Host "  Downloading $($model.Name) ($($model.Size))..." -ForegroundColor Gray
-        try {
-            $ProgressPreference = 'SilentlyContinue'
-            Invoke-WebRequest -Uri $model.Url -OutFile $model.Path -UseBasicParsing
-            $ProgressPreference = 'Continue'
-            
-            if ((Test-Path $model.Path) -and ((Get-Item $model.Path).Length -gt 0)) {
-                $sizeMB = [math]::Round((Get-Item $model.Path).Length / 1MB, 2)
-                Write-Host "  [OK] $($model.Name) downloaded ($sizeMB MB)" -ForegroundColor Green
-            } else {
-                throw "Downloaded file is empty or invalid"
-            }
-        } catch {
-            Write-Host "  [ERROR] Failed to download $($model.Name): $_" -ForegroundColor Red
-            if (Test-Path $model.Path) {
-                Remove-Item $model.Path -Force
-            }
-            $downloadErrors += "$($model.Name): $_"
-        }
+foreach ($modelName in $models.Keys) {
+    $modelPath = Join-Path $modelsDir $modelName
+    $modelUrl = $models[$modelName]
+    
+    if (Test-Path $modelPath) {
+        $sizeMB = [math]::Round((Get-Item $modelPath).Length / 1MB, 2)
+        Write-Host "  [OK] $modelName already exists ($sizeMB MB)" -ForegroundColor Green
     } else {
-        $sizeMB = [math]::Round((Get-Item $model.Path).Length / 1MB, 2)
-        Write-Host "  [OK] $($model.Name) already present ($sizeMB MB)" -ForegroundColor Green
+        Write-Host "  Downloading $modelName..." -ForegroundColor Gray
+        try {
+            Invoke-WebRequest -Uri $modelUrl -OutFile $modelPath -UseBasicParsing
+            $sizeMB = [math]::Round((Get-Item $modelPath).Length / 1MB, 2)
+            Write-Host "  [OK] $modelName downloaded ($sizeMB MB)" -ForegroundColor Green
+        } catch {
+            Write-Host "  [ERROR] Failed to download $modelName`: $_" -ForegroundColor Red
+            $downloadErrors += "ONNX model: $modelName"
+        }
     }
 }
 
