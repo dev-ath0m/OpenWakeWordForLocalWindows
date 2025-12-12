@@ -1329,7 +1329,7 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                 
                 # Load TTS model
                 try:
-                    tts = TTS(model_name=model_path)
+                    tts = TTS(model_name=model_path, gpu=(device == "cuda"))
                     print_success(f"Model {model_short} initialized")
                 except Exception as e:
                     print_error(f"Failed to initialize TTS model: {e}")
@@ -1347,10 +1347,10 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                 loading_done.set()
                 spinner_thread.join(timeout=0.5)
                 
-                # Transfer to GPU
-                tts = tts.to(device)
+                # Transfer to GPU (note: TTS library uses gpu=True in constructor, not .to())
+                # tts = tts.to(device)  # This doesn't actually work for TTS inference
                 
-                print_success(f"Model {model_short} loaded successfully")
+                print_success(f"Model {model_short} loaded successfully on {device.upper()}")
                 
                 # Flag to track first generation (warmup)
                 first_generation = True
@@ -1449,11 +1449,13 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                             
                             # Update progress bar
                             total_valid = train_count + test_count
+                            var_display = variation if len(variation) <= 15 else variation[:12] + '...'
                             pbar.n = total_valid
                             pbar.set_postfix({
                                 'Train': train_count,
                                 'Test': test_count,
-                                'Failed': failed_count
+                                'Failed': failed_count,
+                                'Text': f"'{var_display}'"
                             })
                             pbar.refresh()
                                 
@@ -1607,11 +1609,11 @@ def _generate_negative_samples(wake_word: str, n_samples: int, n_samples_val: in
                 init_thread.daemon = True
                 init_thread.start()
                 
-                tts = TTS(model_name=model_name)
+                tts = TTS(model_name=model_name, gpu=(device == "cuda"))
                 init_done.set()
                 init_thread.join(timeout=0.5)
                 
-                # Transfer to GPU with spinner
+                # GPU transfer spinner (note: TTS uses gpu=True in constructor)
                 gpu_done = threading.Event()
                 def gpu_spinner():
                     spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
@@ -1619,7 +1621,7 @@ def _generate_negative_samples(wake_word: str, n_samples: int, n_samples_val: in
                     start_time = time_module.time()
                     while not gpu_done.is_set():
                         elapsed = time_module.time() - start_time
-                        print(f"\r{Colors.OKCYAN}  {spinner_chars[idx]} Transferring {model_short} to {device}... (elapsed: {int(elapsed)}s){Colors.ENDC}", 
+                        print(f"\r{Colors.OKCYAN}  {spinner_chars[idx]} Model ready on {device.upper()}... (elapsed: {int(elapsed)}s){Colors.ENDC}", 
                               end='', flush=True)
                         idx = (idx + 1) % len(spinner_chars)
                         time_module.sleep(0.1)
@@ -1629,11 +1631,11 @@ def _generate_negative_samples(wake_word: str, n_samples: int, n_samples_val: in
                 gpu_thread.daemon = True
                 gpu_thread.start()
                 
-                tts = tts.to(device)
+                # tts = tts.to(device)  # This doesn't work for TTS - use gpu=True instead
                 gpu_done.set()
                 gpu_thread.join(timeout=0.5)
                 
-                print_success(f"Model {model_short} loaded successfully")
+                print_success(f"Model {model_short} loaded successfully on {device.upper()}")
                 
                 # Initialize progress bar for this model
                 from tqdm import tqdm
@@ -1684,11 +1686,13 @@ def _generate_negative_samples(wake_word: str, n_samples: int, n_samples_val: in
                             
                             # Update progress bar
                             total_valid = train_count + test_count
+                            text_display = text if len(text) <= 15 else text[:12] + '...'
                             pbar.n = total_valid
                             pbar.set_postfix({
                                 'Train': train_count,
                                 'Test': test_count,
-                                'Failed': failed_count
+                                'Failed': failed_count,
+                                'Text': f"'{text_display}'"
                             })
                             pbar.refresh()
                             
@@ -1735,11 +1739,13 @@ def _generate_negative_samples(wake_word: str, n_samples: int, n_samples_val: in
                             
                             # Update progress bar
                             total_valid = train_count + test_count
+                            text_display = text if len(text) <= 15 else text[:12] + '...'
                             pbar.n = total_valid
                             pbar.set_postfix({
                                 'Train': train_count,
                                 'Test': test_count,
-                                'Failed': failed_count
+                                'Failed': failed_count,
+                                'Text': f"'{text_display}'"
                             })
                             pbar.refresh()
                             
