@@ -1737,19 +1737,6 @@ def _generate_tts_samples_with_model(
                 'GPU': gpu_usage
             })
             pbar.refresh()
-            with open(tts_log_path, 'a') as f:
-                import traceback
-                f.write(f"\n=== Error generating {sample_type.lower()} test sample {test_count} ===\n")
-                f.write(f"Model: {model_short}, Text: {text}\n")
-                f.write(f"Error: {str(e)}\n")
-                f.write(traceback.format_exc())
-                f.write("\n")
-            failed_count += 1
-            if temp_file.exists():
-                temp_file.unlink()
-            if output_file.exists():
-                output_file.unlink()
-            continue
     
     # Close progress bar
     pbar.close()
