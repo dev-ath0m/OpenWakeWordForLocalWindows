@@ -541,27 +541,47 @@ def main():
     """Main download function"""
     # Check arguments
     output_dir = 'audioset_16k'
-    if len(sys.argv) > 1:
-        output_dir = sys.argv[1]
-    
     test_mode = '--test' in sys.argv
+    max_samples = None
+    
+    # Parse command-line arguments
+    i = 1
+    while i < len(sys.argv):
+        arg = sys.argv[i]
+        if arg == '--test':
+            test_mode = True
+        elif arg == '--max-samples' and i + 1 < len(sys.argv):
+            try:
+                max_samples = int(sys.argv[i + 1])
+                i += 1  # Skip next arg (the number)
+            except ValueError:
+                print(f"Error: Invalid value for --max-samples: {sys.argv[i + 1]}")
+                return 1
+        elif not arg.startswith('--'):
+            output_dir = arg
+        i += 1
     
     print("\n" + "="*70)
     print("AudioSet Balanced + Eval Subset Downloader")
     print("="*70)
-    print("\nThis will download audio clips from YouTube using balanced sampling")
-    print(f"Target: ~{TARGET_DATASET_SIZE_GB}GB (~{MAX_CLIPS_TARGET:,} clips)")
-    print(f"Strategy: {MIN_SAMPLES_PER_CATEGORY}-{MAX_SAMPLES_PER_CATEGORY} samples per category across all 527 categories")
-    print("Expected time: 6-24 hours (depends on internet speed)")
-    print("\nNote: Many videos may be unavailable or region-locked")
-    print("Typical success rate: 70-90%")
-    print("="*70 + "\n")
     
-    if test_mode:
-        print("[TEST MODE] Will download only 10 samples from each subset\n")
+    if max_samples:
+        print(f"\nDownloading up to {max_samples} samples")
+        print("Samples will be distributed evenly across categories")
+        limit = max_samples
+    elif test_mode:
+        print("\n[TEST MODE] Will download only 10 samples from each subset")
         limit = 10
     else:
+        print("\nThis will download audio clips from YouTube using balanced sampling")
+        print(f"Target: ~{TARGET_DATASET_SIZE_GB}GB (~{MAX_CLIPS_TARGET:,} clips)")
+        print(f"Strategy: {MIN_SAMPLES_PER_CATEGORY}-{MAX_SAMPLES_PER_CATEGORY} samples per category across all 527 categories")
+        print("Expected time: 6-24 hours (depends on internet speed)")
+        print("\nNote: Many videos may be unavailable or region-locked")
+        print("Typical success rate: 70-90%")
         limit = None
+    
+    print("="*70 + "\n")
     
     # Check dependencies
     print("Checking dependencies...")

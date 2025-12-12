@@ -33,22 +33,27 @@ def print_header(text: str):
     print(f"\n{Colors.HEADER}{Colors.BOLD}{'='*70}{Colors.ENDC}")
     print(f"{Colors.HEADER}{Colors.BOLD}{text.center(70)}{Colors.ENDC}")
     print(f"{Colors.HEADER}{Colors.BOLD}{'='*70}{Colors.ENDC}\n")
+    sys.stdout.flush()  # Ensure header is displayed before any input prompts
 
 def print_success(text: str):
     """Print success message"""
     print(f"{Colors.OKGREEN}[OK] {text}{Colors.ENDC}")
+    sys.stdout.flush()
 
 def print_error(text: str):
     """Print error message"""
     print(f"{Colors.FAIL}[ERROR] {text}{Colors.ENDC}")
+    sys.stdout.flush()
 
 def print_warning(text: str):
     """Print warning message"""
     print(f"{Colors.WARNING}[!] {text}{Colors.ENDC}")
+    sys.stdout.flush()
 
 def print_info(text: str):
     """Print info message"""
     print(f"{Colors.OKCYAN}[INFO] {text}{Colors.ENDC}")
+    sys.stdout.flush()
 
 def check_python_version() -> bool:
     """Check if Python version is 3.11.x"""
@@ -726,8 +731,8 @@ def get_user_input(prompt: str, default: str = None, input_type: type = str):
         full_prompt = f"{Colors.OKCYAN}{prompt}: {Colors.ENDC}"
     
     while True:
-        sys.stdout.flush()  # Ensure prompt is displayed
-        user_input = input(full_prompt).strip()
+        print(full_prompt, end='', flush=True)  # Display prompt immediately
+        user_input = input().strip()
         
         if not user_input and default:
             return input_type(default)
@@ -746,8 +751,8 @@ def get_yes_no(prompt: str, default: bool = True) -> bool:
     full_prompt = f"{Colors.OKCYAN}{prompt} [{default_str}]: {Colors.ENDC}"
     
     while True:
-        sys.stdout.flush()  # Ensure prompt is displayed
-        response = input(full_prompt).strip().lower()
+        print(full_prompt, end='', flush=True)  # Display prompt immediately
+        response = input().strip().lower()
         
         if not response:
             return default
@@ -771,6 +776,7 @@ def get_pronunciations(wake_word: str) -> list:
     pronunciations = [wake_word]  # Always include the original
     
     while True:
+        sys.stdout.flush()
         user_input = input(f"{Colors.OKCYAN}Pronunciation #{len(pronunciations) + 1} (or press Enter to finish): {Colors.ENDC}").strip()
         
         if not user_input:
