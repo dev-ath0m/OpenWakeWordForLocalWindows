@@ -56,6 +56,7 @@ onnx2tf==1.20.0
 
 # For TFLite conversion (required for homie.tflite)
 tensorflow==2.16.2
+tensorflow-probability>=0.24.0
 onnx-tf>=1.10.0
 
 # ===== Utilities =====

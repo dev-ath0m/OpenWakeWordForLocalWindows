@@ -311,7 +311,7 @@ def check_background_datasets(base_dir: Path) -> dict:
     else:
         print_success(f"AudioSet - {audioset_count} files")
     
-    # Offer to download if any are missing
+    # Report summary
     missing = []
     if mit_rirs_count < 250:
         missing.append('mit_rirs')
@@ -323,88 +323,8 @@ def check_background_datasets(base_dir: Path) -> dict:
         missing.append('audioset')
     
     if missing:
-        print()
-        if get_yes_no("Download optional datasets now? This improves model quality", default=False):
-            # Download MIT RIRs (small, quick - direct from MIT)
-            if 'mit_rirs' in missing:
-                print_info("\nDownloading MIT Room Impulse Responses (~50MB)...")
-                if download_mit_rirs(mit_rirs_path):
-                    mit_rirs_count = len(list(mit_rirs_path.glob("*.wav")))
-                    print_success(f"MIT RIRs downloaded: {mit_rirs_count} files")
-            
-            # Download MIT Environmental (from HuggingFace - matches original Colab)
-            if 'mit_environmental' in missing:
-                print_info("\nDownloading MIT Environmental Impulse Responses from HuggingFace (~300MB)...")
-                print_info("This matches the original Colab training notebook")
-                if download_mit_environmental(mit_env_path):
-                    mit_env_count = len(list(mit_env_path.glob("*.wav")))
-                    print_success(f"MIT Environmental downloaded: {mit_env_count} files")
-            
-            # Download FMA (larger)
-            if 'fma' in missing:
-                print_info("\nFMA (Free Music Archive) download options:")
-                print_info("  1. fma_small (7.2 GB, 8,000 tracks) - Recommended")
-                print_info("  2. fma_medium (22 GB, 25,000 tracks)")
-                print_info("  3. Skip FMA download (you can add music files manually later)")
-                
-                choice = get_user_input("Choose option", default="1")
-                
-                if choice in ['1', '2']:
-                    if download_fma(fma_path, choice):
-                        fma_count = len(list(fma_path.rglob("*.mp3")))
-                        print_success(f"FMA downloaded: {fma_count} tracks")
-                else:
-                    print_info("Skipped FMA download")
-            
-            # AudioSet download option (Balanced + Eval subsets)
-            if 'audioset' in missing:
-                print_info("\nAudioSet Balanced + Eval subsets (for maximum quality):")
-                print_info("  - Downloads ~40,000 audio clips from YouTube")
-                print_info("  - Estimated size: 20-50 GB")
-                print_info("  - Estimated time: 6-24 hours (depends on internet speed)")
-                print_info("  - Requires: yt-dlp and ffmpeg")
-                print_info("  - Note: Many videos may be unavailable/region-locked")
-                print()
-                
-                if get_yes_no("Download AudioSet Balanced+Eval subsets?", default=False):
-                    # Check if download_audioset.py exists
-                    download_script = Path("download_audioset.py")
-                    if not download_script.exists():
-                        print_error("download_audioset.py not found in workspace")
-                        print_info("This script should have been created during setup")
-                    else:
-                        print_info("\nStarting AudioSet download...")
-                        print_warning("This will take several hours. You can stop with Ctrl+C and resume later.")
-                        print()
-                        
-                        # Run download script
-                        import subprocess
-                        try:
-                            # Run in same Python environment
-                            result = subprocess.run(
-                                [sys.executable, str(download_script), str(audioset_path.parent / "audioset_16k")],
-                                check=False
-                            )
-                            
-                            if result.returncode == 0:
-                                audioset_count = len(list(audioset_path.rglob("*.wav")))
-                                print_success(f"AudioSet download complete: {audioset_count} files")
-                            else:
-                                print_warning("AudioSet download incomplete or failed")
-                                print_info("Check audioset_download.log for details")
-                                
-                        except KeyboardInterrupt:
-                            print_warning("\nAudioSet download interrupted")
-                            print_info("You can resume later by running: python download_audioset.py")
-                        except Exception as e:
-                            print_error(f"Failed to run AudioSet download: {e}")
-                else:
-                    print_info("Skipped AudioSet download")
-                    print_info("You can still get excellent results with MIT RIRs and FMA")
-        else:
-            print_info("\nSkipped optional dataset downloads")
-            print_info("Training will use synthetic augmentation (still produces good models)")
-            print_info("You can download these datasets later to improve quality")
+        print_info("\nSome optional datasets are missing (can download later)")
+        print_info("You'll be prompted to download them before training starts")
     else:
         print_success("\nAll background datasets available for high-quality training!")
     
@@ -1632,18 +1552,26 @@ def _generate_tts_samples_with_model(
                file=sys.stdout, mininterval=0.5, dynamic_ncols=True,
                bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]')
     
+    # Force initial display
+    pbar.refresh()
+    
     progress_update_interval = 10
     text_idx = 0
     model_train_count = 0
     
     # Generate training samples
     samples_per_text = max(1, (n_samples - train_count) // len(texts))
+    print(f"\r{Colors.OKBLUE}[DEBUG] Starting generation loop - target: {model_train_target} training samples{Colors.ENDC}", flush=True)
     for text in texts:
         combo_count = 0
         while train_count < n_samples and combo_count < samples_per_text and model_train_count < model_train_target:
             output_file = output_train_dir / f"{model_short}_{train_count}.wav"
             
             try:
+                # Debug: Show we're attempting generation
+                if model_train_count == 0:
+                    print(f"\r{Colors.OKBLUE}[DEBUG] Generating first sample: '{text[:40]}...'{Colors.ENDC}", flush=True)
+                
                 # Generate with speed variation
                 speed = 1.0 + np.random.uniform(-0.1, 0.1)
                 
@@ -1671,6 +1599,10 @@ def _generate_tts_samples_with_model(
                         tts.tts_to_file(**kwargs)
                         audio, _ = librosa.load(str(temp_file), sr=native_sr, mono=True)
                         temp_file.unlink()
+                
+                # Debug: Show TTS completed
+                if model_train_count == 0:
+                    print(f"\r{Colors.OKBLUE}[DEBUG] TTS generation completed, processing audio...{Colors.ENDC}", flush=True)
                 
                 # Trim silence
                 audio_trimmed, _ = librosa.effects.trim(audio, top_db=30)
@@ -1700,21 +1632,6 @@ def _generate_tts_samples_with_model(
                 model_train_count += 1
                 combo_count += 1
                 
-                # Update progress only every N samples to reduce overhead
-                if model_train_count % progress_update_interval == 0:
-                    cpu_usage, gpu_usage = _get_process_usage()
-                    text_display = text[:30] + '...' if len(text) > 30 else text
-                    pbar.n = model_train_count + model_test_count
-                    pbar.set_postfix({
-                        'Train': model_train_count,
-                        'Test': model_test_count,
-                        'Failed': failed_count,
-                        'CPU': f'{cpu_usage:.0f}%',
-                        'GPU': gpu_usage,
-                        'Text': text_display
-                    })
-                    pbar.refresh()
-                
             except Exception as e:
                 # Log detailed error to file for debugging
                 with open(tts_log_path, 'a') as f:
@@ -1726,6 +1643,23 @@ def _generate_tts_samples_with_model(
                     f.write("\n")
                 failed_count += 1
                 combo_count += 1
+                if output_file.exists():
+                    output_file.unlink()
+            
+            # Update progress every 10 attempts (successful or failed) - runs regardless of exception
+            total_attempts = model_train_count + model_test_count + failed_count
+            if total_attempts == 1 or total_attempts % 10 == 0:
+                cpu_usage, gpu_usage = _get_process_usage()
+                success_rate = ((model_train_count + model_test_count) / total_attempts * 100) if total_attempts > 0 else 0
+                pbar.n = model_train_count + model_test_count
+                pbar.set_postfix({
+                    'Train': model_train_count,
+                    'Test': model_test_count,
+                    'Success': f'{success_rate:.1f}%',
+                    'CPU': f'{cpu_usage:.0f}%',
+                    'GPU': gpu_usage
+                })
+                pbar.refresh()
                 if output_file.exists():
                     output_file.unlink()
                 continue
@@ -1786,22 +1720,35 @@ def _generate_tts_samples_with_model(
             test_count += 1
             model_test_count += 1
             
-            # Update progress bar
+        except Exception as e:
+            # Log detailed error to file for debugging
+            with open(tts_log_path, 'a') as f:
+                import traceback
+                f.write(f"\n=== Error generating {sample_type.lower()} test sample {test_count} ===\n")
+                f.write(f"Model: {model_short}, Text: {text}\n")
+                f.write(f"Error: {str(e)}\n")
+                f.write(traceback.format_exc())
+                f.write("\n")
+            failed_count += 1
+            if temp_file.exists():
+                temp_file.unlink()
+            if output_file.exists():
+                output_file.unlink()
+        
+        # Update progress every 10 attempts (successful or failed) - runs regardless of exception
+        total_attempts = model_train_count + model_test_count + failed_count
+        if total_attempts % 10 == 0 or total_attempts == 1:
             cpu_usage, gpu_usage = _get_process_usage()
-            var_display = text if len(text) <= 15 else text[:12] + '...'
+            success_rate = ((model_train_count + model_test_count) / total_attempts * 100) if total_attempts > 0 else 0
             pbar.n = model_train_count + model_test_count
             pbar.set_postfix({
                 'Train': model_train_count,
                 'Test': model_test_count,
-                'Failed': failed_count,
+                'Success': f'{success_rate:.1f}%',
                 'CPU': f'{cpu_usage:.0f}%',
-                'GPU': gpu_usage,
-                'Text': f"'{var_display}'"
+                'GPU': gpu_usage
             })
             pbar.refresh()
-            
-        except Exception as e:
-            # Log detailed error to file for debugging
             with open(tts_log_path, 'a') as f:
                 import traceback
                 f.write(f"\n=== Error generating {sample_type.lower()} test sample {test_count} ===\n")
@@ -2199,15 +2146,14 @@ def _generate_negative_samples(wake_word: str, n_samples: int, n_samples_val: in
                             train_count += 1
                             model_train_count += 1
                             
-                            # Update progress bar (every 10 samples to reduce overhead)
-                            if train_count % 10 == 0:
+                            # Update progress on first sample and every 10 samples to reduce overhead
+                            if model_train_count == 1 or model_train_count % 10 == 0:
                                 cpu_usage, gpu_usage = _get_process_usage()
-                                total_valid = train_count + test_count
                                 text_display = text if len(text) <= 30 else text[:27] + '...'
-                                pbar.n = total_valid
+                                pbar.n = model_train_count + model_test_count
                                 pbar.set_postfix({
-                                    'Train': train_count,
-                                    'Test': test_count,
+                                    'Train': model_train_count,
+                                    'Test': model_test_count,
                                     'Failed': failed_count,
                                     'CPU': f'{cpu_usage:.0f}%',
                                     'GPU': gpu_usage,
@@ -2285,14 +2231,13 @@ def _generate_negative_samples(wake_word: str, n_samples: int, n_samples_val: in
                             test_count += 1
                             model_test_count += 1
                             
-                            # Update progress bar
+                            # Update progress bar (test samples are fewer, update every time)
                             cpu_usage, gpu_usage = _get_process_usage()
-                            total_valid = train_count + test_count
                             text_display = text if len(text) <= 30 else text[:27] + '...'
-                            pbar.n = total_valid
+                            pbar.n = model_train_count + model_test_count
                             pbar.set_postfix({
-                                'Train': train_count,
-                                'Test': test_count,
+                                'Train': model_train_count,
+                                'Test': model_test_count,
                                 'Failed': failed_count,
                                 'CPU': f'{cpu_usage:.0f}%',
                                 'GPU': gpu_usage,
@@ -2693,116 +2638,186 @@ def main():
     
     print_success(f"\nUsing {len(pronunciations)} pronunciation(s) for training")
     
-    # Step 4.5: Download additional AudioSet samples if needed
-    audioset_path = base_dir / "audioset_16k"
-    audioset_count = len(list(audioset_path.rglob("*.wav"))) if audioset_path.exists() else 0
-    
-    # If we don't have many AudioSet samples, offer to download more
-    if audioset_count < 1000:  # Recommend at least 1000 background samples
-        print_header("Background Audio Samples")
-        print_info(f"Current AudioSet samples: {audioset_count}")
-        print_info("Recommended: 1000+ samples for best quality")
-        print()
-        print_info("You can download more background samples from YouTube (AudioSet)")
-        print_info("This will significantly improve model quality by providing diverse backgrounds")
-        print_warning(f"Note: You have {audioset_count} samples. More samples = better quality model")
-        print()
-        
-        # Calculate how many samples needed to reach 1000
-        samples_needed = max(0, 1000 - audioset_count)
-        print_info(f"To reach 1000 samples, you need {samples_needed} more files")
-        print()
-        
-        # Ask user how many samples to download
-        download_count = get_user_input(
-            f"How many additional samples to download? (0 to skip, recommended: {samples_needed}+)",
-            default="0",
-            input_type=int
-        )
-        
-        if download_count > 0:
-            # Check if download_audioset.py exists
-            download_script = Path("download_audioset.py")
-            if not download_script.exists():
-                print_error("download_audioset.py not found in workspace")
-                print_info("You can download it from the OpenWakeWord repository")
-            else:
-                print_info(f"\nStarting AudioSet download ({download_count} samples)...")
-                print_warning("This will take several hours. You can stop with Ctrl+C and resume later.")
-                print()
-                
-                # Run download script with sample count
-                import subprocess
-                try:
-                    # Pass the number of samples as argument
-                    result = subprocess.run(
-                        [sys.executable, str(download_script), str(audioset_path), "--max-samples", str(download_count)],
-                        check=False
-                    )
-                    
-                    if result.returncode == 0:
-                        new_count = len(list(audioset_path.rglob("*.wav")))
-                        downloaded = new_count - audioset_count
-                        print_success(f"AudioSet download complete: {downloaded} new files ({new_count} total)")
-                    else:
-                        print_warning("AudioSet download incomplete or failed")
-                        print_info("Continuing with existing samples")
-                        
-                except KeyboardInterrupt:
-                    print_warning("\nAudioSet download interrupted")
-                    new_count = len(list(audioset_path.rglob("*.wav")))
-                    if new_count > audioset_count:
-                        downloaded = new_count - audioset_count
-                        print_info(f"Partial download: {downloaded} new files ({new_count} total)")
-                    print_info("Continuing with existing samples")
-                except Exception as e:
-                    print_error(f"Failed to run AudioSet download: {e}")
-                    print_info("Continuing with existing samples")
-        else:
-            print_info("Skipping additional downloads")
-            print_info(f"Continuing with {audioset_count} AudioSet samples")
-            if audioset_count < 100:
-                print_warning("Low sample count may result in reduced model quality")
-    
-    # Step 5: Get training parameters
+    # Step 4.5: Get training parameters BEFORE downloads
     print_header("Training Parameters")
     
-    print_info("Number of samples to generate:")
-    print_info("  - Quick test: 1000 samples (~30-60 min)")
-    print_info("  - Standard: 3000 samples (~2-4 hours)")
-    print_info("  - High quality: 5000+ samples (4+ hours)")
+    print_info("Number of wake word examples to generate:")
+    print_info("  Controls the variety and robustness of the model")
+    print_info("  - Quick test: 1,000 samples (usually produces good results)")
+    print_info("  - Standard: 3,000 samples (recommended)")
+    print_info("  - Best quality: 30,000-50,000 samples (often produces best results)")
+    print_info("  Time: ~1-2 min per 100 samples on GPU")
     n_samples = get_user_input("Number of samples", default="3000", input_type=int)
     
-    print_info("\nTraining steps:")
-    print_info("  - Quick test: 10000 steps")
-    print_info("  - Standard: 30000 steps")
-    print_info("  - High quality: 50000+ steps")
+    print_info("\nNumber of training steps:")
+    print_info("  Controls how long to train the model")
+    print_info("  - Quick test: 10,000 steps (usually works well)")
+    print_info("  - Standard: 30,000 steps (recommended)")
+    print_info("  - Best quality: 50,000+ steps (training longer usually helps)")
+    print_info("  Time: ~1-2 sec per 100 steps on GPU")
     training_steps = get_user_input("Training steps", default="30000", input_type=int)
     
     print_info("\nFalse activation penalty (max_negative_weight):")
+    print_info("  Controls how strongly false activations are penalized")
+    print_info("  Higher values = less likely to activate incorrectly")
     print_info("  - Lower (10-100): More sensitive, may trigger on similar sounds")
-    print_info("  - Medium (100-1000): Balanced - recommended starting point")
-    print_info("  - Higher (1000-5000): Very strict, fewer false activations")
-    print_info("  - Very High (5000+): Maximum strictness, may miss some activations")
+    print_info("  - Medium (100-1000): Balanced - good starting point")
+    print_info("  - Higher (1000-5000): Stricter, fewer false activations")
+    print_info("  - Very High (5000+): Maximum strictness, but may miss unclear speech with noise")
     false_activation_penalty = get_user_input("False activation penalty", default="1000", input_type=float)
     
-    # Step 6: Confirm settings
+    print(f"\n{Colors.OKBLUE}[DEBUG] About to show Background Dataset Configuration...{Colors.ENDC}")
+    print(f"[DEBUG] background_status: {background_status}")
+    
+    # Background dataset configuration
+    print_header("Background Dataset Configuration")
+    print_info("Background datasets add noise/music for realistic training")
+    
+    # FMA music dataset
+    if not background_status['fma']:
+        print_info("\nFMA (Free Music Archive) - background music:")
+        print_info("  1. fma_small (7.2 GB, 8,000 tracks) - Recommended")
+        print_info("  2. fma_medium (22 GB, 25,000 tracks) - More variety")
+        print_info("  3. Skip FMA download")
+        fma_choice = get_user_input("FMA dataset choice", default="1")
+    else:
+        fma_choice = "0"  # Already have it
+        fma_count = len(list((base_dir / "fma").rglob("*.mp3")))
+        print_info(f"\nFMA already available: {fma_count} tracks")
+    
+    # AudioSet background noise - ALWAYS ask (even if some exist)
+    audioset_path = base_dir / "audioset_16k"
+    audioset_count = len(list(audioset_path.rglob("*.wav"))) if audioset_path.exists() else 0
+    
+    print_info("\nAudioSet - diverse environmental sounds:")
+    print_info(f"  Current: {audioset_count} samples")
+    print_info("  Recommended: 1,000+ samples for good quality")
+    print_info("  Downloads from YouTube (requires yt-dlp and ffmpeg)")
+    
+    samples_needed = max(0, 1000 - audioset_count)
+    default_target = str(samples_needed) if samples_needed > 0 else "0"
+    audioset_target = get_user_input(
+        f"Additional AudioSet samples to download (0 to skip)",
+        default=default_target,
+        input_type=int
+    )
+    
+    # Step 5: Configuration Summary and Final Confirmation
     print_header("Configuration Summary")
     print(f"{Colors.BOLD}Wake Word:{Colors.ENDC} {wake_word}")
     print(f"{Colors.BOLD}Pronunciations:{Colors.ENDC} {', '.join(pronunciations)}")
     print(f"{Colors.BOLD}Samples:{Colors.ENDC} {n_samples}")
     print(f"{Colors.BOLD}Training Steps:{Colors.ENDC} {training_steps}")
     print(f"{Colors.BOLD}False Activation Penalty:{Colors.ENDC} {false_activation_penalty}")
+    
+    # Show background dataset choices
+    fma_labels = {"0": "Already downloaded", "1": "FMA Small (7.2 GB)", "2": "FMA Medium (22 GB)", "3": "Skip"}
+    print(f"{Colors.BOLD}FMA Dataset:{Colors.ENDC} {fma_labels.get(fma_choice, fma_choice)}")
+    
+    if audioset_target > 0:
+        total_after = audioset_count + audioset_target
+        print(f"{Colors.BOLD}AudioSet:{Colors.ENDC} Download {audioset_target} more (current: {audioset_count}, target: {total_after})")
+    else:
+        print(f"{Colors.BOLD}AudioSet:{Colors.ENDC} Current: {audioset_count} samples (no download)")
+    
     print(f"{Colors.BOLD}GPU Acceleration:{Colors.ENDC} {'Yes - ' + gpu_name if has_gpu else 'No (CPU only)'}")
     
-    if not get_yes_no("\nProceed with training?", default=True):
+    print()
+    print_info("Once you proceed, the following will run automatically:")
+    print_info("  1. Download missing background datasets (if any)")
+    print_info("  2. Generate wake word samples")
+    print_info("  3. Augment samples with noise/reverb")
+    print_info("  4. Train the model")
+    print_info("  5. Export to ONNX and TFLite formats")
+    print()
+    print_warning("This process may take several hours depending on your settings")
+    print_warning("You can leave the machine unattended - no further prompts will appear")
+    print()
+    
+    if not get_yes_no("Proceed with automated training?", default=True):
         print_info("Training cancelled")
         sys.exit(0)
     
-    # Step 6.5: Cleanup incomplete training from previous runs
+    # Step 6: Download background datasets if needed (fully automated, no prompts)
+    print_header("Preparing Background Datasets")
+    
+    if not background_status['mit_rirs'] or not background_status['mit_environmental'] or not background_status['fma'] or not background_status['audioset']:
+        print_info("Downloading missing background datasets automatically...")
+        print_info("This improves model quality and runs unattended")
+        print()
+        
+        # Download MIT RIRs (small, quick - direct from MIT)
+        if not background_status['mit_rirs']:
+            print_info("Downloading MIT Room Impulse Responses (~50MB)...")
+            mit_rirs_path = base_dir / "mit_rirs"
+            if download_mit_rirs(mit_rirs_path):
+                mit_rirs_count = len(list(mit_rirs_path.glob("*.wav")))
+                print_success(f"MIT RIRs downloaded: {mit_rirs_count} files")
+            else:
+                print_warning("MIT RIRs download failed - continuing without")
+        
+        # Download MIT Environmental (from HuggingFace - matches original Colab)
+        if not background_status['mit_environmental']:
+            print_info("Downloading MIT Environmental Impulse Responses from HuggingFace (~300MB)...")
+            mit_env_path = base_dir / "MIT_environmental_impulse_responses"
+            if download_mit_environmental(mit_env_path):
+                mit_env_count = len(list(mit_env_path.glob("*.wav")))
+                print_success(f"MIT Environmental downloaded: {mit_env_count} files")
+            else:
+                print_warning("MIT Environmental download failed - continuing without")
+        
+        # Download FMA based on user choice
+        if not background_status['fma'] and fma_choice in ['1', '2']:
+            fma_size = "small (7.2 GB, 8,000 tracks)" if fma_choice == '1' else "medium (22 GB, 25,000 tracks)"
+            print_info(f"Downloading FMA {fma_size}...")
+            print_warning("This will take a while depending on your internet speed")
+            fma_path = base_dir / "fma"
+            if download_fma(fma_path, fma_choice):
+                fma_count = len(list(fma_path.rglob("*.mp3")))
+                print_success(f"FMA downloaded: {fma_count} tracks")
+            else:
+                print_warning("FMA download failed - continuing without")
+        elif fma_choice == '3':
+            print_info("Skipping FMA download (user choice)")
+        
+        # Download AudioSet based on user's target
+        if audioset_target > 0:
+            audioset_path = base_dir / "audioset_16k"
+            current_count = len(list(audioset_path.rglob("*.wav"))) if audioset_path.exists() else 0
+            
+            print_info(f"Downloading {audioset_target} additional AudioSet samples...")
+            print_info(f"Current: {current_count} samples, Target: {current_count + audioset_target} total")
+            print_warning("This will take several hours - downloading from YouTube")
+            
+            download_script = Path("download_audioset.py")
+            if download_script.exists():
+                import subprocess
+                try:
+                    result = subprocess.run(
+                        [sys.executable, str(download_script), str(audioset_path), "--max-samples", str(audioset_target)],
+                        check=False
+                    )
+                    
+                    new_count = len(list(audioset_path.rglob("*.wav")))
+                    print_success(f"AudioSet download complete: {new_count} samples")
+                    
+                except KeyboardInterrupt:
+                    print_warning("\nAudioSet download interrupted")
+                    new_count = len(list(audioset_path.rglob("*.wav")))
+                    print_info(f"Partial download: {new_count} samples available")
+                except Exception as e:
+                    print_warning(f"AudioSet download error: {e}")
+                    print_info("Continuing without AudioSet")
+            else:
+                print_warning("download_audioset.py not found - skipping AudioSet")
+        elif audioset_target == 0 and not background_status['audioset']:
+            print_info("Skipping AudioSet download (user choice)")
+    else:
+        print_success("All background datasets already available")
+    
+    # Step 7: Cleanup and create configuration
     cleanup_incomplete_training(wake_word, base_dir)
     
-    # Step 7: Create configuration
     config_file = create_training_config(
         wake_word=wake_word,
         n_samples=n_samples,
@@ -2812,11 +2827,11 @@ def main():
         use_gpu=has_gpu
     )
     
-    # Step 8: Generate samples
+    # Step 8: Generate samples (automated, no prompts)
+    print_header("Generating Wake Word Samples")
     if not generate_samples(wake_word, pronunciations, n_samples, base_dir):
-        print_error("Sample generation failed")
-        if not get_yes_no("Continue with existing samples?", default=False):
-            sys.exit(1)
+        print_error("Sample generation failed - cannot continue")
+        sys.exit(1)
     
     # Step 8.5: Verify all audio files are 16kHz (generated samples + background audio)
     print_header("Audio Sample Rate Verification")
