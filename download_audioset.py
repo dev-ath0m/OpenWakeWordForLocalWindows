@@ -16,6 +16,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 from tqdm import tqdm
+import signal
 
 # Setup logging
 logging.basicConfig(
@@ -41,6 +42,14 @@ MAX_CLIPS_TARGET = int((TARGET_DATASET_SIZE_GB * 1024 * 1024 * 1024) / ESTIMATED
 MIN_SAMPLES_PER_CATEGORY = 5  # Minimum samples per category before moving to next round
 MAX_SAMPLES_PER_CATEGORY = 100  # Maximum samples per category to prevent over-representation
 MAX_WORKERS = 8  # Number of parallel download threads
+
+# Global shutdown flag for graceful cancellation
+shutdown_event = threading.Event()
+
+def signal_handler(signum, frame):
+    """Handle Ctrl+C to gracefully shutdown all threads"""
+    logging.info("\n\nInterrupt received! Canceling all downloads...")
+    shutdown_event.set()
 
 def check_dependencies():
     """Check if yt-dlp and ffmpeg are installed"""
@@ -388,6 +397,10 @@ def download_from_csv(csv_path, output_dir, subset_name, class_labels=None, limi
     
     def download_task(segment_data):
         """Download a single segment (for parallel execution)"""
+        # Check if shutdown requested
+        if shutdown_event.is_set():
+            return False, []
+        
         i, segment = segment_data
         youtube_id = segment[0]
         start_sec = segment[1]
@@ -404,6 +417,10 @@ def download_from_csv(csv_path, output_dir, subset_name, class_labels=None, limi
                 for label in labels:
                     stats['category_coverage'][label] = stats['category_coverage'].get(label, 0) + 1
             return True, labels
+        
+        # Check again before downloading
+        if shutdown_event.is_set():
+            return False, []
         
         # Download
         success = download_audio_segment(youtube_id, start_sec, end_sec, output_path)
@@ -422,6 +439,10 @@ def download_from_csv(csv_path, output_dir, subset_name, class_labels=None, limi
     
     # Parallel download with thread pool
     logging.info(f"Starting parallel download with {MAX_WORKERS} workers...")
+    logging.info("Press Ctrl+C to cancel download at any time")
+    
+    # Register signal handler for graceful shutdown
+    original_sigint = signal.signal(signal.SIGINT, signal_handler)
     
     # Create progress bar
     pbar = tqdm(total=len(segments_ordered), 
@@ -429,41 +450,58 @@ def download_from_csv(csv_path, output_dir, subset_name, class_labels=None, limi
                 unit="clips",
                 bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]')
     
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        # Submit all tasks
-        future_to_segment = {
-            executor.submit(download_task, (i, segment)): i 
-            for i, segment in enumerate(segments_ordered, 1)
-        }
-        
-        # Process completed downloads
-        for future in as_completed(future_to_segment):
-            i = future_to_segment[future]
-            progress_counter += 1
+    try:
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            # Submit all tasks
+            future_to_segment = {
+                executor.submit(download_task, (i, segment)): i 
+                for i, segment in enumerate(segments_ordered, 1)
+            }
             
-            try:
-                future.result()
-            except Exception as e:
-                logging.warning(f"Error processing segment {i}: {e}")
-                with stats_lock:
-                    stats['failed'] += 1
-            
-            # Update progress bar
-            with stats_lock:
-                # Calculate current statistics
-                current_size_gb = stats['success'] * ESTIMATED_BYTES_PER_CLIP / 1024 / 1024 / 1024
-                categories_with_min = sum(1 for count in stats['category_coverage'].values() if count >= MIN_SAMPLES_PER_CATEGORY)
+            # Process completed downloads
+            for future in as_completed(future_to_segment):
+                # Check if shutdown was requested
+                if shutdown_event.is_set():
+                    logging.info("Canceling remaining downloads...")
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    break
                 
-                # Update progress bar with postfix info
-                pbar.set_postfix({
-                    'OK': stats['success'],
-                    'Failed': stats['failed'],
-                    'Size': f"{current_size_gb:.1f}/{TARGET_DATASET_SIZE_GB}GB",
-                    'Categories': f"{categories_with_min}/{stats['categories']} with {MIN_SAMPLES_PER_CATEGORY}+"
-                })
-                pbar.update(1)
-    
-    pbar.close()
+                i = future_to_segment[future]
+                progress_counter += 1
+                
+                try:
+                    future.result()
+                except Exception as e:
+                    if not shutdown_event.is_set():
+                        logging.warning(f"Error processing segment {i}: {e}")
+                    with stats_lock:
+                        stats['failed'] += 1
+                
+                # Update progress bar
+                with stats_lock:
+                    # Calculate current statistics
+                    current_size_gb = stats['success'] * ESTIMATED_BYTES_PER_CLIP / 1024 / 1024 / 1024
+                    categories_with_min = sum(1 for count in stats['category_coverage'].values() if count >= MIN_SAMPLES_PER_CATEGORY)
+                    
+                    # Update progress bar with postfix info
+                    pbar.set_postfix({
+                        'OK': stats['success'],
+                        'Failed': stats['failed'],
+                        'Size': f"{current_size_gb:.1f}/{TARGET_DATASET_SIZE_GB}GB",
+                        'Categories': f"{categories_with_min}/{stats['categories']} with {MIN_SAMPLES_PER_CATEGORY}+"
+                    })
+                    pbar.update(1)
+    except KeyboardInterrupt:
+        logging.info("\nKeyboardInterrupt detected - shutting down gracefully...")
+        shutdown_event.set()
+    finally:
+        # Restore original signal handler
+        signal.signal(signal.SIGINT, original_sigint)
+        pbar.close()
+        
+        if shutdown_event.is_set():
+            logging.info("\nDownload canceled by user")
+            logging.info(f"Downloaded {stats['success']} clips before cancellation")
     
     # Final stats with category coverage
     elapsed = time.time() - start_time_overall
