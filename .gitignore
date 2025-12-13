@@ -1,0 +1,14 @@
+/wakeword_env
+/clips
+/tts
+training_config_homie.yaml
+openwakeword/
+/trained_models
+*.npy
+/fma
+/mit_rirs
+fma_temp.zip
+*.log
+/audioset_16k
+/MIT_environmental_impulse_responses
+/__pycache__
