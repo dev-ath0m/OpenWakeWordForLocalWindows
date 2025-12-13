@@ -2652,7 +2652,7 @@ def check_and_fix_audio_sample_rates(config: dict, remove_corrupted: bool = True
     Returns:
         True if all files were processed successfully, False if errors occurred
     """
-    from audio_utils import scan_and_convert_audio_files
+    from scripts.audio_utils import scan_and_convert_audio_files
     
     print_header("Checking Audio File Sample Rates")
     
@@ -3060,7 +3060,7 @@ def main():
             print_info(f"Current: {current_count} samples, Target: {current_count + audioset_target} total")
             print_warning("This will take several hours - downloading from YouTube")
             
-            download_script = Path("download_audioset.py")
+            download_script = Path("scripts/download_audioset.py")
             if download_script.exists():
                 import subprocess
                 try:
@@ -3082,7 +3082,7 @@ def main():
                     print_warning(f"AudioSet download error: {e}")
                     print_info("Continuing without AudioSet")
             else:
-                print_warning("download_audioset.py not found - skipping AudioSet")
+                print_warning("scripts/download_audioset.py not found - skipping AudioSet")
         elif audioset_target == 0 and not background_status['audioset']:
             print_info("Skipping AudioSet download (user choice)")
     else:
