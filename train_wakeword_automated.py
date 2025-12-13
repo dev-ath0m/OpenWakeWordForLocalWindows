@@ -2305,8 +2305,10 @@ def _patch_openwakeword_train_py(base_dir: Path) -> bool:
     """Apply runtime patches to OpenWakeWord's train.py for compatibility fixes.
     
     Patches:
-    1. Fix TFLite conversion for TensorFlow 2.16+ (use onnx2tf instead of onnx-tf)
-    2. Fix Windows file locking in trim_mmap function
+    1. Fix warmup_steps division by zero for low step counts
+    2. Fix TFLite conversion for TensorFlow 2.16+ (use onnx2tf instead of onnx-tf)
+    3. Fix Windows file locking in trim_mmap function
+    4. Filter out directories from RIR paths (only include .wav files)
     
     Returns:
         True if patching succeeded, False otherwise
@@ -2334,8 +2336,12 @@ def _patch_openwakeword_train_py(base_dir: Path) -> bool:
         # Check if patches already applied (look for minimal API version without fallback)
         minimal_api_signature = 'onnx2tf.convert(\n                input_onnx_file_path=onnx_model_path,\n                output_folder_path=tmp_dir\n            )'
         no_fallback_signature = 'raise RuntimeError(f"TFLite conversion failed: {e}") from e'
+        warmup_fix_signature = 'if warmup_steps > 0:'
+        rir_filter_signature = 'i.is_file() and i.path.endswith'
         
-        if minimal_api_signature in train_content and no_fallback_signature in train_content and 'explicit close + gc' in data_content:
+        if (minimal_api_signature in train_content and no_fallback_signature in train_content and 
+            warmup_fix_signature in train_content and rir_filter_signature in train_content and 
+            'explicit close + gc' in data_content):
             return True  # Already patched with correct version
         
         # Check if old patch with deprecated API or onnx-tf fallback is present
@@ -2351,7 +2357,27 @@ def _patch_openwakeword_train_py(base_dir: Path) -> bool:
         else:
             print_info("Applying compatibility patches to OpenWakeWord...")
         
-        # Patch 1: Fix TFLite conversion in train.py
+        # Patch 1: Fix warmup_steps division by zero for low step counts
+        old_warmup_code = '''    def lr_warmup_cosine_decay(self, global_step, warmup_steps, hold_steps, total_steps,
+                               start_lr=0, target_lr=0.001):
+        # Linear warm up
+        warmup_lr = target_lr * (global_step / warmup_steps)'''
+        
+        new_warmup_code = '''    def lr_warmup_cosine_decay(self, global_step, warmup_steps, hold_steps, total_steps,
+                               start_lr=0, target_lr=0.001):
+        # Linear warm up (avoid division by zero for very small warmup_steps)
+        if warmup_steps > 0:
+            warmup_lr = target_lr * (global_step / warmup_steps)
+        else:
+            warmup_lr = target_lr'''
+        
+        if old_warmup_code in train_content:
+            train_content = train_content.replace(old_warmup_code, new_warmup_code)
+            print_success("  ✓ Patched warmup_steps division by zero fix")
+        else:
+            print_warning("  ! Warmup code not found (may already be patched)")
+        
+        # Patch 2: Fix TFLite conversion in train.py
         old_convert_func = '''# Separate function to convert onnx models to tflite format
 def convert_onnx_to_tflite(onnx_model_path, output_path):
     """Converts an ONNX version of an openwakeword model to the Tensorflow tflite format."""
@@ -2423,7 +2449,27 @@ def convert_onnx_to_tflite(onnx_model_path, output_path):
         else:
             print_warning("  ! TFLite conversion function not found (may already be patched)")
         
-        # Patch 2: Fix Windows file locking in data.py
+        # Patch 3: Filter out directories from RIR paths (only include audio files)
+        old_rir_line = '    rir_paths = [i.path for j in config["rir_paths"] for i in os.scandir(j)]'
+        new_rir_line = '    rir_paths = [i.path for j in config["rir_paths"] for i in os.scandir(j) if i.is_file() and i.path.endswith((\'.wav\', \'.WAV\'))]'
+        
+        if old_rir_line in train_content:
+            train_content = train_content.replace(old_rir_line, new_rir_line)
+            print_success("  ✓ Patched RIR path collection to exclude directories")
+        else:
+            print_warning("  ! RIR path collection code not found (may already be patched)")
+        
+        # Also filter background_paths to exclude directories
+        old_bg_line = '        background_paths.extend([i.path for i in os.scandir(background_path)]*duplication_rate)'
+        new_bg_line = '        background_paths.extend([i.path for i in os.scandir(background_path) if i.is_file() and i.path.endswith((\'.wav\', \'.mp3\', \'.WAV\', \'.MP3\'))]*duplication_rate)'
+        
+        if old_bg_line in train_content:
+            train_content = train_content.replace(old_bg_line, new_bg_line)
+            print_success("  ✓ Patched background path collection to exclude directories")
+        else:
+            print_warning("  ! Background path collection code not found (may already be patched)")
+        
+        # Patch 4: Fix Windows file locking in data.py
         old_trim_code = '''    # Close memory-mapped files before deleting (Windows requires this)
     del mmap_file1
     del mmap_file2
@@ -2628,9 +2674,16 @@ def export_to_onnx(model_dir: Path, model_name: str) -> Optional[Path]:
         size_kb = onnx_file.stat().st_size / 1024
         print_success(f"ONNX model found: {onnx_file}")
         print_info(f"Size: {size_kb:.2f} KB")
+        
+        # Verify file size is reasonable (should be > 50 KB for a valid model)
+        if size_kb < 50:
+            print_error(f"ONNX file is too small ({size_kb:.2f} KB) - likely corrupted")
+            return None
+        
         return onnx_file
     else:
-        print_warning("ONNX model not found - may need manual export")
+        print_error(f"ONNX model not found at: {onnx_file}")
+        print_error("Training script did not produce the expected output")
         return None
 
 def convert_to_tflite(onnx_file: Path) -> Optional[Path]:
@@ -2821,11 +2874,18 @@ def main():
     
     print_info("\nNumber of training steps:")
     print_info("  Controls how long to train the model")
+    print_info("  - Minimum: 100 steps (required)")
     print_info("  - Quick test: 10,000 steps (usually works well)")
     print_info("  - Standard: 30,000 steps (recommended)")
     print_info("  - Best quality: 50,000+ steps (training longer usually helps)")
     print_info("  Time: ~1-2 sec per 100 steps on GPU")
-    training_steps = get_user_input("Training steps", default="30000", input_type=int)
+    
+    while True:
+        training_steps = get_user_input("Training steps", default="30000", input_type=int)
+        if training_steps >= 100:
+            break
+        print_error(f"Training steps must be at least 100 (you entered {training_steps})")
+        print_info("Low step counts cause numerical errors in the warmup calculation")
     
     print_info("\nFalse activation penalty (max_negative_weight):")
     print_info("  Controls how strongly false activations are penalized")
@@ -3041,15 +3101,35 @@ def main():
     
     # Step 10: Train model
     if not train_model(config_file, base_dir):
-        print_error("Model training failed")
+        print_error("Model training failed - cannot proceed")
+        print_error("Check the training log for details")
         sys.exit(1)
     
-    # Step 11: Export models
+    # Step 11: Verify training output and export models
     model_name = wake_word.lower().replace(' ', '_')
-    model_dir = base_dir / "trained_models" / model_name
+    model_dir = base_dir / "trained_models" / model_name / model_name
+    
+    # Check if training actually produced a model directory
+    if not model_dir.exists():
+        print_error(f"Training output directory not found: {model_dir}")
+        print_error("Training may have failed silently - check logs")
+        sys.exit(1)
+    
+    # Verify model checkpoint exists (sign of successful training)
+    checkpoint_files = list(model_dir.glob("*.pkl"))
+    if not checkpoint_files:
+        print_error(f"No model checkpoint files found in {model_dir}")
+        print_error("Training completed but produced no output model")
+        sys.exit(1)
+    
+    print_success(f"Training output verified: {len(checkpoint_files)} model file(s) found")
     
     onnx_file = export_to_onnx(model_dir, model_name)
-    tflite_file = convert_to_tflite(onnx_file) if onnx_file else None
+    if not onnx_file:
+        print_error("ONNX export failed - model training may have issues")
+        sys.exit(1)
+    
+    tflite_file = convert_to_tflite(onnx_file)
     
     # Step 12: Print summary
     print_summary(wake_word, model_dir, onnx_file, tflite_file, n_samples, training_steps)
