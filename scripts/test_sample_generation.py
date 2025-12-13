@@ -65,6 +65,10 @@ def test_sample_generation(wake_word: str, pronunciations: List[str], base_dir: 
     test_files = []
     
     try:
+        # Set TTS cache to use workspace tts folder
+        import os
+        os.environ['TTS_HOME'] = str(base_dir / 'tts')
+        
         # Import TTS
         from TTS.api import TTS
         
