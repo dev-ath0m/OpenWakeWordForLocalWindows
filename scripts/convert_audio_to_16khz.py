@@ -6,7 +6,7 @@ Used during setup to ensure all background noise and RIR files are compatible
 
 import sys
 from pathlib import Path
-from audio_utils import scan_and_convert_audio_files
+from scripts.audio_utils import scan_and_convert_audio_files
 
 
 def convert_directory(directory, file_extensions=['.wav', '.mp3'], target_sr=16000, max_workers=4, remove_corrupted=True):
