@@ -1771,19 +1771,28 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
         slow_models = [m for m in tts_models if m.get("max_samples") is not None]
         
         # Calculate distribution:
-        # - Slow models: 2% of total samples (capped by their max_samples limit)
-        # - Fast models: Split remaining 98% evenly
+        # Training samples:
+        #   - Slow models: 2% of training samples (capped by their max_samples limit)
+        #   - Fast models: Split remaining 98% evenly
+        # Test samples:
+        #   - Slow models ONLY (higher quality for validation)
+        #   - Split evenly across slow models
         slow_total_target = int(n_samples * 0.02)  # 2% for slow models
         slow_samples_each = slow_total_target // len(slow_models) if slow_models else 0
         
         fast_total_target = n_samples - (slow_samples_each * len(slow_models))
         fast_samples_each = fast_total_target // len(fast_models) if fast_models else 0
         
+        # Test samples: only use slow models for higher quality validation
+        slow_test_each = n_samples_val // len(slow_models) if slow_models else 0
+        
         print_info(f"Using {len(tts_models)} TTS models ({len(fast_models)} fast, {len(slow_models)} slow)")
         print_info(f"Target: {n_samples} training samples + {n_samples_val} test samples")
-        print_info(f"Distribution:")
+        print_info(f"Training distribution:")
         print_info(f"  - Fast models: ~{fast_samples_each} samples each ({len(fast_models)} models)")
         print_info(f"  - Slow models: ~{slow_samples_each} samples each ({len(slow_models)} models, 2% total)")
+        print_info(f"Test distribution:")
+        print_info(f"  - Slow models only: ~{slow_test_each} samples each (high quality for validation)")
         print_info(f"Device: {device.upper()}")
         print_info("Starting sample generation...\n")
         
@@ -1794,13 +1803,15 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
         # Combine models with their targets
         models_with_targets = []
         for model in fast_models:
-            models_with_targets.append((model, fast_samples_each))
+            # Fast models: training only, no test samples
+            models_with_targets.append((model, fast_samples_each, 0))
         for model in slow_models:
-            # Respect the model's max_samples limit
-            target = min(slow_samples_each, model.get("max_samples", slow_samples_each))
-            models_with_targets.append((model, target))
+            # Slow models: both training and test samples
+            # Respect the model's max_samples limit for training
+            train_target = min(slow_samples_each, model.get("max_samples", slow_samples_each))
+            models_with_targets.append((model, train_target, slow_test_each))
         
-        for model_config, model_target in models_with_targets:
+        for model_config, model_train_target, model_test_target in models_with_targets:
             model_path = model_config["model"]
             model_short = model_path.split('/')[-1]
             
@@ -1840,9 +1851,7 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                 print_success(f"Model {model_short} initialized on {device.upper()}\")")
                 print_success(f"Model {model_short} loaded successfully on {device.upper()}")
                 
-                # Calculate test samples proportionally (10% of training target)
-                model_test_target = max(1, model_target // 10)
-                
+                # Use the test target already calculated (0 for fast models, split evenly for slow models)
                 # Use common function to generate samples
                 train_count, test_count, failed_count = _generate_tts_samples_with_model(
                     tts=tts,
@@ -1850,7 +1859,7 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
                     texts=pronunciations,
                     output_train_dir=positive_train_dir,
                     output_test_dir=positive_test_dir,
-                    model_train_target=model_target,
+                    model_train_target=model_train_target,
                     model_test_target=model_test_target,
                     train_count=train_count,
                     test_count=test_count,
@@ -1974,26 +1983,39 @@ def _generate_negative_samples(wake_word: str, n_samples: int, n_samples_val: in
         # Use the same TTS models as positive sample generation
         tts_models_config = _get_tts_models_config()
         
+        # Separate fast and slow models
+        fast_models = [m for m in tts_models_config if m.get("max_samples") is None]
+        slow_models = [m for m in tts_models_config if m.get("max_samples") is not None]
+        
+        # Same distribution strategy as positive samples
+        slow_total_target = int(n_samples * 0.02)
+        slow_samples_each = slow_total_target // len(slow_models) if slow_models else 0
+        
+        fast_total_target = n_samples - (slow_samples_each * len(slow_models))
+        fast_samples_each = fast_total_target // len(fast_models) if fast_models else 0
+        
+        # Test samples: only use slow models for higher quality
+        slow_test_each = n_samples_val // len(slow_models) if slow_models else 0
+        
         train_count = 0
         test_count = 0
         failed_count = 0
+        
+        # Combine models with their targets
+        models_with_targets = []
+        for model in fast_models:
+            # Fast models: training only, no test samples
+            models_with_targets.append((model, fast_samples_each, 0))
+        for model in slow_models:
+            # Slow models: both training and test samples
+            train_target = min(slow_samples_each, model.get("max_samples", slow_samples_each))
+            models_with_targets.append((model, train_target, slow_test_each))
         
         # Generate samples using each model configuration
         import threading
         import time as time_module
         
-        for model_config in tts_models_config:
-            if train_count >= n_samples and test_count >= n_samples_val:
-                break
-            
-            # Check if this model has a sample limit (for slow models)
-            model_limit = model_config.get("max_samples", None)
-            if model_limit is not None:
-                model_train_target = min(model_limit, n_samples - train_count)
-                model_test_target = min(model_limit // 10, n_samples_val - test_count)
-            else:
-                model_train_target = n_samples
-                model_test_target = n_samples_val
+        for model_config, model_train_target, model_test_target in models_with_targets:
             
             model_name = model_config["model"]
             model_short = model_name.split('/')[-1]
