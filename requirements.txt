@@ -1,0 +1,89 @@
+# OpenWakeWord Custom Training Environment
+# Python 3.11.x required
+# Tested on Windows with CUDA 12.4
+
+# ===== Core TTS and Speech Processing =====
+# Note: Using 0.21.3 with manual GPU forcing for vocoder
+TTS==0.21.3
+piper-tts
+webrtcvad
+pronouncing==0.2.0
+deep-phonemizer==0.0.19
+
+# ===== System Monitoring (for progress bars) =====
+psutil
+nvidia-ml-py  # NVIDIA GPU monitoring (replaces deprecated pynvml)
+
+# ===== PyTorch (CUDA) =====
+# Compatible versions for TTS 0.21.3 - install with CUDA 12.4 support
+# Install with: pip install torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0+cu124 --index-url https://download.pytorch.org/whl/cu124
+torch==2.6.0
+torchvision==0.21.0
+torchaudio==2.6.0
+
+# ===== Audio Processing and Augmentation =====
+audiomentations==0.33.0
+torch-audiomentations==0.11.0
+acoustics==0.2.6
+speechbrain==0.5.14
+mutagen==1.47.0
+librosa==0.10.2.post1
+soundfile
+resampy
+pydub
+soxr==0.5.0
+
+# ===== Scientific Computing =====
+numpy==1.26.4
+scipy>=1.13,<1.17
+pandas
+networkx==2.8.8
+fsspec==2023.10.0
+
+# ===== Machine Learning and Training =====
+torchinfo==1.8.0
+torchmetrics==1.2.0
+datasets==2.14.6
+pyarrow>=12.0.0,<15.0.0
+
+# ===== Model Export and Conversion =====
+onnx==1.15.0
+onnxruntime==1.22.1
+onnxsim
+onnx-graphsurgeon
+sng4onnx
+onnx2tf==1.20.0
+
+# For TFLite conversion (required for homie.tflite)
+tensorflow==2.16.2
+tensorflow-probability==0.24.0  # Compatible with TensorFlow 2.16.x
+# Note: onnx-tf is deprecated and incompatible with TF 2.16+ (uses Keras 3.x)
+# Use onnx2tf instead for TFLite conversion
+
+# ===== Utilities =====
+tqdm
+pyyaml
+requests
+pillow
+attrs
+
+# ===== Development Tools (optional) =====
+ipython
+jupyter
+
+# ===== Notes =====
+# 1. Install PyTorch with CUDA first:
+#    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+#
+# 2. For Windows: audiomentations 0.33.0 is used (no output_type parameter needed)
+#
+# 3. TFLite conversion is optional and has dependency conflicts
+#    ONNX format works perfectly with OpenWakeWord and Home Assistant
+#
+# 4. Tested configuration:
+#    - Python 3.11.x
+#    - Windows 11
+#    - NVIDIA GPU with CUDA 12.4
+#    - audiomentations 0.33.0 (stable on Windows)
+#    - numpy 1.26.4 (compatible with all dependencies)
+#    - scipy 1.16.3 (works with audiomentations 0.33.0)
