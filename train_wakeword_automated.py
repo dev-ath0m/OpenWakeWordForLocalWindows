@@ -1530,7 +1530,7 @@ def _generate_tts_samples_with_model(
     except:
         native_sr = 22050
     
-    print_info(f"Starting generation with {len(texts)} text variant(s)...")
+    print_info(f"Starting generation with {len(texts)} text variant(s): {', '.join(texts)}")
     print_info(f"Native TTS sample rate: {native_sr}Hz → Resampling to 16kHz")
     
     # Setup progress bar (show only this model's target, not global total)
@@ -1640,6 +1640,7 @@ def _generate_tts_samples_with_model(
                 success_rate = ((model_train_count + model_test_count) / total_attempts * 100) if total_attempts > 0 else 0
                 pbar.n = model_train_count + model_test_count
                 pbar.set_postfix({
+                    'Variant': f'"{text[:20]}..."' if len(text) > 20 else f'"{text}"',
                     'Train': model_train_count,
                     'Test': model_test_count,
                     'Success': f'{success_rate:.1f}%',
@@ -1725,6 +1726,7 @@ def _generate_tts_samples_with_model(
             success_rate = ((model_train_count + model_test_count) / total_attempts * 100) if total_attempts > 0 else 0
             pbar.n = model_train_count + model_test_count
             pbar.set_postfix({
+                'Variant': f'"{text[:20]}..."' if len(text) > 20 else f'"{text}"',
                 'Train': model_train_count,
                 'Test': model_test_count,
                 'Success': f'{success_rate:.1f}%',
@@ -1794,6 +1796,10 @@ def _generate_positive_samples(wake_word: str, pronunciations: list, n_samples: 
         print_info(f"Test distribution:")
         print_info(f"  - Slow models only: ~{slow_test_each} samples each (high quality for validation)")
         print_info(f"Device: {device.upper()}")
+        print_info("\n[Model Loading Strategy]")
+        print_info("Each model is loaded ONCE and generates all its samples (all text variations)")
+        print_info("before unloading and moving to the next model.")
+        print_info("This ensures efficient GPU memory usage and faster generation.\n")
         print_info("Starting sample generation...\n")
         
         train_count = 0
