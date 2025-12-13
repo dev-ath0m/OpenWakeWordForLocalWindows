@@ -3107,29 +3107,32 @@ def main():
     
     # Step 11: Verify training output and export models
     model_name = wake_word.lower().replace(' ', '_')
-    model_dir = base_dir / "trained_models" / model_name / model_name
+    model_dir = base_dir / "trained_models"
     
-    # Check if training actually produced a model directory
-    if not model_dir.exists():
-        print_error(f"Training output directory not found: {model_dir}")
+    # Check if ONNX model was created (sign of successful training)
+    onnx_file = model_dir / f"{model_name}.onnx"
+    if not onnx_file.exists():
+        print_error(f"Training output ONNX file not found: {onnx_file}")
         print_error("Training may have failed silently - check logs")
         sys.exit(1)
     
-    # Verify model checkpoint exists (sign of successful training)
-    checkpoint_files = list(model_dir.glob("*.pkl"))
-    if not checkpoint_files:
-        print_error(f"No model checkpoint files found in {model_dir}")
-        print_error("Training completed but produced no output model")
+    # Verify model file size is reasonable
+    onnx_size_kb = onnx_file.stat().st_size / 1024
+    if onnx_size_kb < 50:
+        print_error(f"ONNX file is too small ({onnx_size_kb:.2f} KB) - likely corrupted")
+        print_error("Training completed but produced invalid model")
         sys.exit(1)
     
-    print_success(f"Training output verified: {len(checkpoint_files)} model file(s) found")
+    print_success(f"Training output verified: {onnx_file} ({onnx_size_kb:.2f} KB)")
     
-    onnx_file = export_to_onnx(model_dir, model_name)
-    if not onnx_file:
-        print_error("ONNX export failed - model training may have issues")
-        sys.exit(1)
-    
-    tflite_file = convert_to_tflite(onnx_file)
+    # ONNX file already exists from training, just return it
+    tflite_file = model_dir / f"{model_name}.tflite"
+    if tflite_file.exists():
+        tflite_size_kb = tflite_file.stat().st_size / 1024
+        print_success(f"TFLite model also created: {tflite_file} ({tflite_size_kb:.2f} KB)")
+    else:
+        tflite_file = None
+        print_info("TFLite model not created (optional - ONNX is sufficient)")
     
     # Step 12: Print summary
     print_summary(wake_word, model_dir, onnx_file, tflite_file, n_samples, training_steps)
