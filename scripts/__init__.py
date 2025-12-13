@@ -15,5 +15,6 @@ __all__ = [
     'generate_positive_samples',
     'generate_negative_samples',
     'augment_samples',
-    'test_sample_generation'
+    'test_sample_generation',
+    'record_custom_samples'
 ]
