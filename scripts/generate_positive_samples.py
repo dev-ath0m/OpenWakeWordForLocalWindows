@@ -38,7 +38,7 @@ def get_tts_models_config():
 
 def setup_tts_environment(base_dir: Path):
     """Setup TTS environment with PyTorch 2.6 compatibility fixes"""
-    os.environ['TTS_HOME'] = str(base_dir)
+    os.environ['TTS_HOME'] = str(base_dir / 'tts')
     
     # Fix PyTorch 2.6 weights_only issue for TTS models
     import torch
