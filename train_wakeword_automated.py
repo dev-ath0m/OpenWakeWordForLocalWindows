@@ -28,35 +28,37 @@ from scripts.console_logger import (
     print_summary
 )
 
+# Import script modules
+from scripts.setup_environment import (
+    check_python_version,
+    check_gpu,
+    check_virtual_env,
+    check_dependencies,
+    install_dependencies as _install_dependencies
+)
+from scripts.download_training_features import download_training_features
+from scripts.download_background_datasets import (
+    download_mit_rirs,
+    download_mit_environmental,
+    download_fma
+)
+from scripts.clone_openwakeword_repo import clone_openwakeword, check_onnx_models
+from scripts.test_sample_generation import test_sample_generation
+from scripts.generate_positive_samples import generate_positive_samples
+from scripts.generate_negative_samples import generate_negative_samples
+from scripts.augment_samples import augment_samples as _augment_samples, run_subprocess_with_logging
+from scripts.convert_audio_to_16khz import check_and_fix_audio_sample_rates
+from scripts.patch_openwakeword_for_windows import apply_patches
+
 # Suppress FutureWarning about pynvml deprecation (PyTorch CUDA still uses old import)
 # The nvidia-ml-py package is installed and will be used automatically
 warnings.filterwarnings('ignore', message='.*pynvml package is deprecated.*')
 
 
-def check_python_version() -> bool:
-    """Check if Python version is 3.11.x"""
-    from scripts.setup_environment import check_python_version as _check_python_version
-    return _check_python_version()
-
-def check_gpu() -> Tuple[bool, Optional[str]]:
-    """Check for NVIDIA GPU and CUDA availability"""
-    from scripts.setup_environment import check_gpu as _check_gpu
-    return _check_gpu()
-
-def check_virtual_env() -> bool:
-    """Check if running in virtual environment"""
-    from scripts.setup_environment import check_virtual_env as _check_virtual_env
-    return _check_virtual_env()
-
-def check_dependencies() -> dict:
-    """Check if required packages are installed"""
-    from scripts.setup_environment import check_dependencies as _check_dependencies
-    return _check_dependencies()
-
-def download_training_features(base_dir: Path) -> bool:
-    """Download ACAV100M and validation features from Hugging Face"""
-    from scripts.download_training_features import download_training_features as _download_training_features
-    return _download_training_features(base_dir)
+def install_dependencies() -> bool:
+    """Install missing dependencies"""
+    requirements_file = Path(__file__).parent / "requirements.txt"
+    return _install_dependencies(requirements_file)
 
 def check_background_datasets(base_dir: Path) -> dict:
     """Check and optionally download background datasets for improved model quality"""
@@ -126,37 +128,6 @@ def check_background_datasets(base_dir: Path) -> dict:
         'fma': fma_count >= 100,
         'audioset': audioset_count >= 100
     }
-
-def download_mit_rirs(output_path: Path) -> bool:
-    """Download MIT Room Impulse Responses (~50MB, 271 files)"""
-    from scripts.download_background_datasets import download_mit_rirs as _download_mit_rirs
-    return _download_mit_rirs(output_path)
-
-def download_mit_environmental(output_path: Path) -> bool:
-    """Download MIT Environmental Impulse Responses from HuggingFace (~300MB)"""
-    from scripts.download_background_datasets import download_mit_environmental as _download_mit_environmental
-    return _download_mit_environmental(output_path)
-
-def download_fma(output_path: Path, size: str) -> bool:
-    """Download FMA dataset (7.2GB for small, 22GB for medium)"""
-    from scripts.download_background_datasets import download_fma as _download_fma
-    return _download_fma(output_path, size)
-
-def clone_openwakeword(base_dir: Path) -> bool:
-    """Clone OpenWakeWord repository if not present and install it"""
-    from scripts.clone_openwakeword_repo import clone_openwakeword as _clone_openwakeword
-    return _clone_openwakeword(base_dir)
-
-def check_onnx_models() -> bool:
-    """Verify ONNX models exist (should be downloaded by setup script)"""
-    from scripts.clone_openwakeword_repo import check_onnx_models as _check_onnx_models
-    return _check_onnx_models()
-
-def install_dependencies() -> bool:
-    """Install missing dependencies"""
-    from scripts.setup_environment import install_dependencies as _install_dependencies
-    requirements_file = Path(__file__).parent / "requirements.txt"
-    return _install_dependencies(requirements_file)
 
 def get_user_input(prompt: str, default: str = None, input_type: type = str):
     """Get user input with optional default value"""
@@ -231,10 +202,6 @@ def get_pronunciations(wake_word: str) -> list:
     
     return pronunciations
 
-def test_sample_generation(wake_word: str, pronunciations: list, base_dir: Path) -> list:
-    """Generate test samples for each pronunciation and get user feedback using extracted module"""
-    from scripts.test_sample_generation import test_sample_generation as do_test_generation
-    return do_test_generation(wake_word, pronunciations, base_dir)
 
 def cleanup_incomplete_training(wake_word: str, base_dir: Path) -> None:
     """Clean up incomplete training artifacts that could interfere with new training"""
@@ -413,9 +380,6 @@ def create_training_config(
 
 def generate_samples(wake_word: str, pronunciations: list, n_samples: int, base_dir: Path) -> bool:
     """Generate TTS samples for training using extracted modules"""
-    from scripts.generate_positive_samples import generate_positive_samples
-    from scripts.generate_negative_samples import generate_negative_samples
-    
     # Calculate validation samples (10% of training samples)
     n_samples_val = max(1, n_samples // 10)
     
@@ -433,41 +397,13 @@ def generate_samples(wake_word: str, pronunciations: list, n_samples: int, base_
     
     return True
 
-
-def _patch_openwakeword_train_py(base_dir: Path) -> bool:
-    """Apply runtime patches to OpenWakeWord's train.py for compatibility fixes.
-    
-    Wrapper function that delegates to scripts.patch_openwakeword_for_windows module.
-    
-    Patches:
-    1. Fix warmup_steps division by zero for low step counts
-    2. Fix TFLite conversion for TensorFlow 2.16+ (use onnx2tf instead of onnx-tf)
-    3. Fix Windows file locking in trim_mmap function
-    4. Filter out directories from RIR paths (only include .wav files)
-    5. Filter out directories from background paths (only include audio files)
-    
-    Returns:
-        True if patching succeeded, False otherwise
-    """
-    from scripts.patch_openwakeword_for_windows import apply_patches
-    
-    # Delegate to the patch module with verbose=False to use our print functions
-    return apply_patches(base_dir, verbose=False)
-
-
-def augment_samples(config_file: Path, base_dir: Path) -> bool:
-    """Augment samples with background noise and room impulse responses using extracted module"""
-    from scripts.augment_samples import augment_samples as do_augmentation
-    return do_augmentation(config_file, base_dir)
-
 def train_model(config_file: Path, base_dir: Path) -> bool:
     """Train the wake word model with progress monitoring"""
-    from scripts.augment_samples import run_subprocess_with_logging
     
     print_header("Training Model")
     
     # Apply compatibility patches to OpenWakeWord
-    if not _patch_openwakeword_train_py(base_dir):
+    if not apply_patches(base_dir, verbose=False):
         print_error("Failed to apply OpenWakeWord patches")
         return False
     
@@ -504,23 +440,6 @@ def train_model(config_file: Path, base_dir: Path) -> bool:
         print_success("Training completed successfully")
     
     return result
-
-
-
-def check_and_fix_audio_sample_rates(config: dict, remove_corrupted: bool = True) -> bool:
-    """Check and convert all background/RIR files to 16kHz using parallel processing
-    
-    Wrapper function that delegates to scripts.convert_audio_to_16khz module.
-    
-    Args:
-        config: Configuration dict with 'background_paths' and 'rir_paths'
-        remove_corrupted: If True, delete files that cannot be loaded or converted
-    
-    Returns:
-        True if all files were processed successfully, False if errors occurred
-    """
-    from scripts.convert_audio_to_16khz import check_and_fix_audio_sample_rates as do_check_and_fix
-    return do_check_and_fix(config, remove_corrupted)
 
 def main():
     """Main automated workflow"""
@@ -835,7 +754,7 @@ def main():
             sys.exit(1)
     
     # Step 9: Augment samples
-    if not augment_samples(config_file, base_dir):
+    if not _augment_samples(config_file, base_dir):
         print_error("Sample augmentation failed")
         if not get_yes_no("Continue anyway?", default=False):
             sys.exit(1)
