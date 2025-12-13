@@ -2,6 +2,15 @@
 """
 Automated Wake Word Training Workflow
 Complete pipeline from environment check to model export
+
+Features:
+- Environment validation (Python version, GPU, dependencies)
+- Background dataset management (MIT RIRs, FMA, AudioSet)
+- TTS-based sample generation with multiple voices
+- Custom voice recording from microphone (optional)
+- Audio augmentation with noise and reverb
+- Model training with OpenWakeWord
+- Export to ONNX and TFLite formats
 """
 
 import os
@@ -44,6 +53,7 @@ from scripts.download_background_datasets import (
 )
 from scripts.clone_openwakeword_repo import clone_openwakeword, check_onnx_models
 from scripts.test_sample_generation import test_sample_generation
+from scripts.record_custom_samples import record_custom_samples
 from scripts.generate_positive_samples import generate_positive_samples
 from scripts.generate_negative_samples import generate_negative_samples
 from scripts.augment_samples import augment_samples as _augment_samples, run_subprocess_with_logging
@@ -201,7 +211,6 @@ def get_pronunciations(wake_word: str) -> list:
         print_info(f"  {i}. {p}")
     
     return pronunciations
-
 
 def cleanup_incomplete_training(wake_word: str, base_dir: Path) -> None:
     """Clean up incomplete training artifacts that could interfere with new training"""
@@ -378,18 +387,41 @@ def create_training_config(
     
     return config_file
 
-def generate_samples(wake_word: str, pronunciations: list, n_samples: int, base_dir: Path) -> bool:
-    """Generate TTS samples for training using extracted modules"""
+def generate_samples(wake_word: str, pronunciations: list, n_samples: int, base_dir: Path, custom_samples_count: int = 0) -> bool:
+    """Generate TTS samples for training using extracted modules
+    
+    Args:
+        wake_word: The wake word to generate samples for
+        pronunciations: List of pronunciation variations
+        n_samples: Number of TTS samples to generate
+        base_dir: Base directory for the project
+        custom_samples_count: Number of custom voice samples recorded
+    """
     # Calculate validation samples (10% of training samples)
     n_samples_val = max(1, n_samples // 10)
     
+    # If we have custom samples, reduce TTS generation accordingly
+    # Custom samples are already high quality, so we need fewer TTS samples
+    if custom_samples_count > 0:
+        print_info(f"\nAdjusting TTS generation: {custom_samples_count} custom samples already recorded")
+        # Reduce TTS samples by the number of custom samples (they're worth more!)
+        adjusted_n_samples = max(100, n_samples - (custom_samples_count * 2))
+        print_info(f"Generating {adjusted_n_samples} TTS samples (reduced from {n_samples})")
+        print_info(f"Custom samples count as ~{custom_samples_count * 2} TTS samples due to higher quality")
+        print_success(f"\n✓ Training dataset will include:")
+        print_info(f"  • {adjusted_n_samples} TTS-generated samples")
+        print_info(f"  • {custom_samples_count} custom voice samples (already saved)")
+        print_info(f"  • Total: {adjusted_n_samples + custom_samples_count} positive samples\n")
+    else:
+        adjusted_n_samples = n_samples
+    
     # Generate both positive and negative samples using extracted modules
-    positive_success = generate_positive_samples(wake_word, pronunciations, n_samples, n_samples_val, base_dir)
+    positive_success = generate_positive_samples(wake_word, pronunciations, adjusted_n_samples, n_samples_val, base_dir)
     if not positive_success:
         print_error("Positive sample generation failed - cannot continue")
         return False
     
-    negative_success = generate_negative_samples(wake_word, n_samples, n_samples_val, base_dir)
+    negative_success = generate_negative_samples(wake_word, adjusted_n_samples, n_samples_val, base_dir)
     if not negative_success:
         print_error("Negative sample generation failed - cannot continue")
         print_error("Training requires both positive and negative samples")
@@ -521,7 +553,23 @@ def main():
     
     print_success(f"\nUsing {len(pronunciations)} pronunciation(s) for training")
     
-    # Step 4.5: Get training parameters BEFORE downloads
+    # Step 4.5: Record custom voice samples (optional)
+    custom_samples_count = 0
+    if get_yes_no("\nRecord your own voice samples?", default=False):
+        print_info("\nRecording your own voice adds your unique pronunciation to the training data")
+        print_info("This can significantly improve accuracy for your specific voice")
+        print_info("Press SPACE to record each sample, ENTER when done (recommend 10+ samples)\n")
+        
+        success, count = record_custom_samples(wake_word, base_dir, target_count=10)
+        if success:
+            custom_samples_count = count
+            print_success(f"Added {count} custom voice samples to training data")
+        else:
+            print_info("Skipping custom voice samples")
+    else:
+        print_info("Skipping custom voice recording - using TTS-generated samples only")
+    
+    # Step 4.6: Get training parameters BEFORE downloads
     print_header("Training Parameters")
     
     print_info("Number of wake word examples to generate:")
@@ -721,7 +769,7 @@ def main():
     
     # Step 8: Generate samples (automated, no prompts)
     print_header("Generating Wake Word Samples")
-    if not generate_samples(wake_word, pronunciations, n_samples, base_dir):
+    if not generate_samples(wake_word, pronunciations, n_samples, base_dir, custom_samples_count):
         print_error("Sample generation failed - cannot continue")
         sys.exit(1)
     
