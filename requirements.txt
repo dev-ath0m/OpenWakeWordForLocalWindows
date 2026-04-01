@@ -29,9 +29,13 @@ speechbrain==0.5.14
 mutagen==1.47.0
 librosa==0.10.2.post1
 soundfile
+sounddevice  # For recording custom voice samples
 resampy
 pydub
 soxr==0.5.0
+
+# ===== User Input and Interaction =====
+pynput  # For keyboard input during recording
 
 # ===== Scientific Computing =====
 numpy==1.26.4
