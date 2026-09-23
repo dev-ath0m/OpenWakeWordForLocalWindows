@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
 """
-Shared audio processing utilities for sample rate conversion
-Used by both training script and standalone conversion tool
+Convert all audio files (WAV/MP3) to 16kHz sample rate
+Used during setup to ensure all background noise and RIR files are compatible
+
+This module contains all audio sample rate checking and conversion functionality:
+- scan_and_convert_audio_files: Core parallel conversion engine
+- check_audio_file: Validate single file sample rate
+- resample_audio_file: Convert single file to target sample rate
+- check_and_fix_audio_sample_rates: Batch process from config dict
+- convert_directory: Process entire directory structures
 """
 
 import os
@@ -13,6 +20,10 @@ from tqdm import tqdm
 import torchaudio
 import torchaudio.transforms as T
 
+
+# ============================================================================
+# Low-level Audio Processing Functions
+# ============================================================================
 
 @contextlib.contextmanager
 def suppress_stderr():
@@ -97,6 +108,10 @@ def resample_audio_file(args):
     except Exception as e:
         return (file_path, None, f'error: {str(e)[:100]}')
 
+
+# ============================================================================
+# Core Parallel Conversion Engine
+# ============================================================================
 
 def scan_and_convert_audio_files(
     audio_files,
@@ -264,3 +279,163 @@ def scan_and_convert_audio_files(
         'corrupted': total_corrupted,
         'already_correct': already_correct
     }
+
+
+# ============================================================================
+# High-level Batch Processing Functions
+# ============================================================================
+
+def check_and_fix_audio_sample_rates(config: dict, remove_corrupted: bool = True) -> bool:
+    """Check and convert all background/RIR files to 16kHz using parallel processing
+    
+    This function processes audio files from a training configuration dict,
+    checking and converting all background noise and room impulse response files.
+    
+    Args:
+        config: Configuration dict with 'background_paths' and 'rir_paths'
+        remove_corrupted: If True, delete files that cannot be loaded or converted
+    
+    Returns:
+        True if all files were processed successfully, False if errors occurred
+    """
+    from scripts.console_logger import print_header, print_success, print_info, print_warning
+    
+    print_header("Checking Audio File Sample Rates")
+    
+    target_sr = 16000
+    all_audio_paths = []
+    
+    # Collect all audio file paths from config
+    if 'background_paths' in config:
+        for bg_path in config['background_paths']:
+            bg_path = Path(bg_path)
+            if bg_path.exists():
+                all_audio_paths.extend(list(bg_path.glob("**/*.wav")))
+                all_audio_paths.extend(list(bg_path.glob("**/*.mp3")))
+    
+    if 'rir_paths' in config:
+        for rir_path in config['rir_paths']:
+            rir_path = Path(rir_path)
+            if rir_path.exists():
+                all_audio_paths.extend(list(rir_path.glob("**/*.wav")))
+    
+    if not all_audio_paths:
+        print_success("No audio files found to check")
+        return True
+    
+    print_info(f"Found {len(all_audio_paths)} audio files to check")
+    
+    try:
+        # Use shared utility for scanning and conversion
+        results = scan_and_convert_audio_files(
+            audio_files=all_audio_paths,
+            target_sr=target_sr,
+            max_workers=None,  # Auto-detect optimal workers
+            remove_corrupted=remove_corrupted,
+            show_progress=True
+        )
+        
+        # Report results
+        print_success(f"Processed {results['total']} files:")
+        print_info(f"  - Already correct: {results['already_correct']}")
+        print_info(f"  - Converted: {results['converted']}")
+        if results['corrupted'] > 0:
+            status = "removed" if remove_corrupted else "found"
+            print_warning(f"  - Corrupted ({status}): {results['corrupted']}")
+        
+        return True
+    except KeyboardInterrupt:
+        print_warning("\n\nAudio conversion interrupted by user")
+        print_info("Training cannot continue without proper audio file conversion")
+        print_info("Please run the script again when ready")
+        sys.exit(0)
+
+
+
+# ============================================================================
+# Directory Processing Functions
+# ============================================================================
+
+def convert_directory(directory, file_extensions=['.wav', '.mp3'], target_sr=16000, max_workers=4, remove_corrupted=True):
+    """Convert all audio files in a directory to target sample rate
+    
+    Args:
+        directory: Directory to scan
+        file_extensions: File extensions to process
+        target_sr: Target sample rate
+        max_workers: Parallel workers
+        remove_corrupted: Remove corrupted files if True
+    
+    Returns:
+        Tuple of (total_files, converted_files, corrupted_files)
+    """
+    dir_path = Path(directory)
+    
+    if not dir_path.exists():
+        print(f"Directory not found: {directory}")
+        return 0, 0, 0
+    
+    # Find all audio files
+    audio_files = []
+    for ext in file_extensions:
+        audio_files.extend(dir_path.glob(f"**/*{ext}"))
+    
+    if not audio_files:
+        print(f"No audio files found in {directory}")
+        return 0, 0, 0
+    
+    print(f"\nProcessing {len(audio_files)} files in {directory}...")
+    
+    # Use shared utility for scanning and conversion
+    results = scan_and_convert_audio_files(
+        audio_files=audio_files,
+        target_sr=target_sr,
+        max_workers=max_workers,
+        remove_corrupted=remove_corrupted,
+        show_progress=True
+    )
+    
+    return results['total'], results['converted'], results['corrupted']
+
+
+# ============================================================================
+# Standalone Script Entry Point
+# ============================================================================
+
+def main():
+    """Main conversion function"""
+    print("="*70)
+    print("Converting Audio Files to 16kHz".center(70))
+    print("="*70)
+    print("\nCorrupted files will be automatically removed\n")
+    
+    # Directories to process
+    directories = [
+        "mit_rirs",
+        "MIT_environmental_impulse_responses",
+        "fma",
+        "audioset_16k"
+    ]
+    
+    total_files = 0
+    total_converted = 0
+    total_errors = 0
+    
+    for directory in directories:
+        files, converted, errors = convert_directory(directory, file_extensions=['.wav', '.mp3'], remove_corrupted=True)
+        total_files += files
+        total_converted += converted
+        total_errors += errors
+    
+    print("\n" + "="*70)
+    print(f"Conversion Complete!")
+    print(f"  Total files found: {total_files}")
+    print(f"  Files converted: {total_converted}")
+    print(f"  Files already correct: {total_files - total_converted - total_errors}")
+    print(f"  Corrupted files removed: {total_errors}")
+    print("="*70)
+    
+    return 0 if total_files > 0 else 1
+
+if __name__ == "__main__":
+    sys.exit(main())
